@@ -1,0 +1,94 @@
+Overlay patch 0006: push the visionOS drawable toward a 3840 long edge.
+
+VISION-PRO-GUIDE 1.2 -- "the single biggest 2D fidelity lever" on visionOS is
+rendering into a high-resolution drawable and letting the compositor supersample
+it down. A window rendered at ~1400px and warped up looks soft; one rendered at
+3840 and downfiltered looks sharp.
+
+aurora already does the *other* half correctly: it creates its window with
+SDL_WINDOW_HIGH_PIXEL_DENSITY (window.cpp:260), so the guide's "SDL renders at
+1/3 res" trap does not apply here. What is left is the drawable size itself.
+Measured on the Vision Pro 4K simulator:
+
+    [INFO | aurora] Using framebuffer size 2432x1792 scale 2
+
+2432 is the scene's backing size, well under the guide's 3840 target.
+
+HOW THIS PLUMBS THROUGH (see MEASUREMENTS.md frame map):
+    get_window_size() -> resize_swapchain(fb_w, fb_h, native_fb_w, native_fb_h)
+      native_fb -> surfaceConfiguration.width/height -> Dawn -> CAMetalLayer.drawableSize
+      fb        -> the game's own render target (g_frameBuffer)
+So inflating native_fb raises BOTH the drawable and the game's render resolution,
+which is precisely what the guide asks for ("then tell the renderer to render at
+that size"). fb_w/fb_h are seeded from native_fb before g_frameBufferScale is
+applied, so the existing Render-Scale knob still works relative to the new size.
+
+WHY `scale` IS MULTIPLIED TOO (this is the subtle part):
+rmlui -- which draws the prelaunch UI and settings -- maps *input* through the
+derived ratio native_fb/width (rmlui.cpp:155,161), so that stays self-consistent
+under any push. But it sizes the UI itself with `size.scale`
+(rmlui.cpp:67: `s_uiScale > 0 ? s_uiScale : window::get_window_size().scale`),
+which is SDL's display scale and does NOT follow native_fb. Push native_fb
+without scale and the UI keeps rendering at 2x inside a 3.16x buffer -- i.e. the
+menus visibly shrink. Multiplying scale by the same factor keeps the UI's
+physical size constant. (Shipwright needed an equivalent imgui-framebuffer-scale
+fix; same class of coupling.)
+
+SAFE ON THIS PATH: g_renderer is only created when the backend is
+wgpu::BackendType::Null (aurora.cpp:158), so on our Metal build it is nullptr and
+resize_swapchain's SDL_SetRenderLogicalPresentation/SDL_SetRenderScale branch --
+the other consumer of native_fb -- never runs.
+
+visionOS-only: guarded on TARGET_OS_VISION, so iOS/tvOS/macOS/Windows/Linux/
+Android are byte-for-byte unaffected. TargetConditionals.h arrives via SDL3's
+headers on Apple; the #if is inside an `#ifdef __APPLE__` for safety, and an
+undefined identifier evaluates to 0 in #if anyway.
+
+--- a/extern/aurora/lib/window.cpp
++++ b/extern/aurora/lib/window.cpp
+@@ -1,4 +1,8 @@
+ #include "window.hpp"
++
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
+ 
+ #ifdef AURORA_ENABLE_GX
+ #include "imgui.hpp"
+@@ -390,6 +394,24 @@
+   ASSERT(SDL_GetWindowSizeInPixels(g_window, &native_fb_w, &native_fb_h), "Failed to get window size in pixels: {}",
+          SDL_GetError());
+ 
++  float visionDrawablePush = 1.f;
++#if defined(__APPLE__) && TARGET_OS_VISION
++  // visionOS composites and supersamples this window, so drawable resolution
++  // is the main 2D fidelity lever: SDL reports the scene backing size (~2432
++  // long edge), which reads soft. Push the long edge up to kVisionLongEdge and
++  // let the compositor downfilter. Raises the drawable AND the game render
++  // target, since fb_w/fb_h are seeded from native_fb just below.
++  {
++    constexpr int kVisionLongEdge = 3840;
++    const int longEdge = native_fb_w > native_fb_h ? native_fb_w : native_fb_h;
++    if (longEdge > 0 && longEdge < kVisionLongEdge) {
++      visionDrawablePush = static_cast<float>(kVisionLongEdge) / static_cast<float>(longEdge);
++      native_fb_w = static_cast<int>(static_cast<float>(native_fb_w) * visionDrawablePush + 0.5f);
++      native_fb_h = static_cast<int>(static_cast<float>(native_fb_h) * visionDrawablePush + 0.5f);
++    }
++  }
++#endif
++
+   int fb_w = native_fb_w;
+   int fb_h = native_fb_h;
+   if (g_frameBufferScale > 0.f) {
+@@ -410,7 +432,10 @@
+     }
+   }
+ 
+-  const float scale = SDL_GetWindowDisplayScale(g_window);
++  // rmlui sizes the UI with `scale` but maps input through the derived
++  // native_fb/width ratio; carry the drawable push into scale so the menus
++  // keep their physical size instead of shrinking inside the bigger buffer.
++  const float scale = SDL_GetWindowDisplayScale(g_window) * visionDrawablePush;
+   return {
+       .width = static_cast<uint32_t>(width),
+       .height = static_cast<uint32_t>(height),

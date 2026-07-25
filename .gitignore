@@ -1,0 +1,36 @@
+# === ALLOWLIST .gitignore ===
+# This is a public repo. The local working tree contains far more than we publish:
+# internal design docs (CLAUDE.md, DECISIONS.md, *-FABLE.md, *-PLAN.md ...), the
+# private OTA/signing scripts, the vendored upstream engine, build output, and the
+# user's own disc dump. Rather than blocklist each of those (one miss = a leak), we
+# IGNORE EVERYTHING and re-include only the vetted, consumer-facing + buildable
+# subset below. Anything not explicitly listed here stays LOCAL — usable for
+# development, impossible to commit.
+
+/*
+
+# --- public: consumer-facing + reproducible source ---
+!/.gitignore
+!/README.md
+!/LICENSE
+!/VERSION
+!/app
+!/overlay
+!/sidestore
+!/.github
+!/scripts
+!/docs
+
+# scripts/: build + overlay tooling only. The OTA/signing/dev-only scripts stay
+# local (OTA is our private dev channel and must not appear on GitHub).
+/scripts/publish-vision-ota.sh
+/scripts/build-visionos-xcode.sh
+
+# docs/: only the shipped screenshots. The internal build/design notes stay local.
+/docs/*
+!/docs/screenshots
+
+# --- cruft (any depth) ---
+.DS_Store
+__pycache__/
+*.pyc

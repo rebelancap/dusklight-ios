@@ -1,0 +1,67 @@
+Overlay patch 0011: visionOS high-refresh defaults (120Hz on M5).
+
+The target Vision Pro is an M5 (120Hz panel; M2-gen was 90). The frame path already
+supports it -- vsync is on (Fifo present), and aurora does nothing to cap the
+present rate, so a 2D window is composited at up to the panel rate. What was
+missing is the *game* producing distinct frames at that rate:
+
+  - enableFrameInterpolation defaults to Off, so the game renders at TP's ~60Hz
+    simulation rate. The display shows 60 distinct frames even at 120Hz.
+  - In Unlimited mode the sim stays 60Hz but a fresh interpolated frame is
+    rendered every present. With vsync that is present-locked to the compositor
+    = 120 on M5, 90 on M2-gen. This is the clean way to hit the panel rate
+    (no busy-sleep Limiter, unlike Capped).
+
+So on visionOS ONLY, default enableFrameInterpolation to Unlimited.
+
+Also default enableFpsOverlay to true on visionOS. This is a deliberate choice
+for the port's current phase: 120Hz sustained at the 3840 render size (patch
+0006) is GPU-bound, and the only way to know the device actually holds 120 --
+and whether it thermal-throttles -- is to read the counter on the headset. It is
+one toggle to turn off in Settings once verified. (Revisit: default it off once
+the true-gpu_ms instrumentation the charter wants exists.)
+
+Both are plain config defaults the user can change in Settings; nothing here
+forces behavior. visionOS-gated via TARGET_OS_VISION, so every other platform's
+defaults are byte-for-byte unchanged.
+
+--- a/src/dusk/settings.cpp
++++ b/src/dusk/settings.cpp
+@@ -2,6 +2,19 @@
+ #include "dusk/config.hpp"
+ #include <aurora/aurora.h>
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
++// visionOS (M5, 120Hz panel) high-refresh defaults. See overlay 0011.
++#if defined(__APPLE__) && TARGET_OS_VISION
++#define DUSK_DEFAULT_FRAME_INTERP FrameInterpMode::Unlimited
++#define DUSK_DEFAULT_FPS_OVERLAY true
++#else
++#define DUSK_DEFAULT_FRAME_INTERP FrameInterpMode::Off
++#define DUSK_DEFAULT_FPS_OVERLAY false
++#endif
++
+ namespace dusk {
+ 
+ UserSettings g_userSettings = {
+@@ -9,7 +22,7 @@
+         .enableFullscreen {"video.enableFullscreen", false},
+         .enableVsync {"video.enableVsync", true},
+         .lockAspectRatio {"video.lockAspectRatio", false},
+-        .enableFpsOverlay {"game.enableFpsOverlay", false},
++        .enableFpsOverlay {"game.enableFpsOverlay", DUSK_DEFAULT_FPS_OVERLAY},
+         .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
+         .maxFrameRate {"video.maxFrameRate", 240},
+         .rememberWindowSize {"video.rememberWindowSize", false},
+@@ -69,7 +82,7 @@
+         .depthOfFieldMode{"game.depthOfFieldMode", DepthOfFieldMode::Dusk},
+         .disableWaterRefraction {"game.disableWaterRefraction", false},
+         .enableTextureReplacements {"game.enableTextureReplacements", true},
+-        .enableFrameInterpolation {"game.enableFrameInterpolation", FrameInterpMode::Off},
++        .enableFrameInterpolation {"game.enableFrameInterpolation", DUSK_DEFAULT_FRAME_INTERP},
+         .internalResolutionScale {"game.internalResolutionScale", 0},
+         .shadowResolutionMultiplier {"game.shadowResolutionMultiplier", 1},
+         .resampler {"game.resampler", Resampler::Bilinear},

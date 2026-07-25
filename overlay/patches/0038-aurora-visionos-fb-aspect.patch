@@ -1,0 +1,68 @@
+Overlay patch 0038 (Phase 2 / experience): framebuffer aspect override for the panel.
+
+Device feedback: the 3D panel stretched/squeezed the picture at non-default
+width/height (unlike 2D, which renders undistorted at any window shape). Root cause:
+the game renders into a fixed-aspect framebuffer that is then mapped onto the panel
+quad -- any quad aspect != render aspect => stretch.
+
+Fix: let the shell force the framebuffer (render) aspect to the panel's aspect, so
+the game renders AT the panel shape (undistorted at any width/height, exactly like
+2D). aurora.cpp exposes Dusk3D_SetPanelAspect -> window::set_frame_buffer_aspect_override
+(patch 0032); the shell drives it from the Width/Height sliders and clears it (0) on
+3D exit. All edits are in pristine upstream regions of window.cpp/.hpp (no existing
+patch touches the frame-buffer-scale code).
+
+--- a/extern/aurora/lib/window.cpp
++++ b/extern/aurora/lib/window.cpp
+@@ -46,6 +46,10 @@
+ SDL_Renderer* g_renderer;
+ float g_frameBufferScale = 0.f;
+ bool g_frameBufferAspectFit = false;
++// visionOS 3D: force the framebuffer (render) aspect to the panel's, so the game
++// renders AT the panel shape (undistorted at any aspect, like 2D) instead of being
++// stretched onto the quad. 0 = use the window/drawable aspect. Cleared on 3D exit.
++float g_frameBufferAspectOverride = 0.f;
+ AuroraWindowSize g_windowSize;
+ std::vector<AuroraEvent> g_events;
+ std::atomic_bool g_backgrounded = false;
+@@ -422,9 +426,11 @@
+   int fb_h = native_fb_h;
+   if (g_frameBufferScale > 0.f) {
+     const auto [baseW, baseH] = vi::configured_fb_size();
++    const float fbAspect = g_frameBufferAspectOverride > 0.f
++                               ? g_frameBufferAspectOverride
++                               : static_cast<float>(fb_w) / static_cast<float>(fb_h);
+     const auto [scaledW, scaledH] =
+-        scale_frame_buffer_to_aspect(static_cast<int>(baseW), static_cast<int>(baseH), g_frameBufferScale,
+-                                     static_cast<float>(fb_w) / static_cast<float>(fb_h));
++        scale_frame_buffer_to_aspect(static_cast<int>(baseW), static_cast<int>(baseH), g_frameBufferScale, fbAspect);
+     fb_w = scaledW;
+     fb_h = scaledH;
+   }
+@@ -550,6 +556,17 @@
+   request_frame_buffer_resize();
+ }
+ 
++void set_frame_buffer_aspect_override(float aspect) {
++  if (aspect < 0.f) {
++    aspect = 0.f;
++  }
++  if (g_frameBufferAspectOverride == aspect) {
++    return;
++  }
++  g_frameBufferAspectOverride = aspect;
++  request_frame_buffer_resize();
++}
++
+ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, value ? "1" : "0"); }
+ 
+ } // namespace aurora::window
+--- a/extern/aurora/lib/window.hpp
++++ b/extern/aurora/lib/window.hpp
+@@ -50,5 +50,6 @@
+ void request_frame_buffer_resize();
+ void set_frame_buffer_scale(float scale);
+ void set_frame_buffer_aspect_fit(bool fit);
++void set_frame_buffer_aspect_override(float aspect);
+ void set_background_input(bool value);
+ }; // namespace aurora::window

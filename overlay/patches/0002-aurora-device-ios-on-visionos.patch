@@ -1,0 +1,33 @@
+Overlay patch 0002: build aurora's device_ios.mm on visionOS.
+
+aurora_core.cmake compiles lib/device_ios.mm (the CoreHaptics rumble backend)
+only under `if (IOS)`. ios.toolchain.cmake sets IOS=OFF for visionOS, so it is
+skipped -- but the *C++* side still expects it: device.cpp only compiles its
+no-op rumble stub under
+
+    #elif !defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
+
+and SDL3 defines SDL_PLATFORM_IOS on visionOS as well (it keys off
+TARGET_OS_IPHONE, which is 1 on xrOS; SDL's own doc comment reads "defined if
+compiling for iOS or visionOS"). So on visionOS *neither* implementation is
+compiled and the link fails with an undefined aurora::device::rumble.
+
+Fixing it CMake-side rather than widening the C++ gate keeps the change off the
+shared device.cpp path that iOS depends on, and is consistent with treating
+visionOS as UIKit-family (patch 0001). CoreHaptics is present in the xrOS SDK,
+so this links; Vision Pro has no haptics hardware, and device_ios.mm already
+gates every entry point on a runtime capability check
+(CHHapticEngine.capabilitiesForHardware.supportsHaptics), so rumble_available()
+simply reports false there. No behavior change for iOS.
+
+--- a/extern/aurora/cmake/aurora_core.cmake
++++ b/extern/aurora/cmake/aurora_core.cmake
+@@ -27,7 +27,7 @@
+     target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
+ endif ()
+ 
+-if (IOS)
++if (IOS OR VISIONOS)
+     find_library(COREHAPTICS_FRAMEWORK CoreHaptics REQUIRED)
+     target_sources(aurora_core PRIVATE lib/device_ios.mm)
+     set_source_files_properties(lib/device_ios.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)

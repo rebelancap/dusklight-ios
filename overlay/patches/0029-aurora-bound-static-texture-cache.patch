@@ -1,0 +1,146 @@
+Overlay patch 0029: bound the static GX texture cache (fixes the play-session
+memory leak that jetsam-kills the app).
+
+MEASURED (perf-soak log, patch 0027): over a ~15 min play session confined to the
+beginning levels, phys_footprint climbed monotonically 832 -> 4900 MiB and
+available-before-jetsam fell to ~216 MiB, at which point the OS killed the app
+(no crash backtrace -- the file log just ends -- the signature of a jetsam kill).
+fps held a flat 120 and thermal only reached "fair", so this is purely a memory
+leak, not a perf/thermal problem.
+
+ROOT CAUSE: `s_textureObjectCaches` (this file) is an unbounded map keyed by
+`texObjId`, and `GXInitTexObj`/`GXInitTexObjCI` mint a *fresh monotonic id on
+every call* (dolphin/gx/GXTexture.cpp `next_tex_obj_id()`). On real GC/Wii
+hardware `GXInitTexObj` is a free POD initializer the game calls every frame for
+stack-local and reused texture objects (fonts in JUTResFont, particles/rain in
+d_kankyo_rain, UI, effects); aurora turned it into a cache-key allocator. So each
+frame the *same logical texture* gets a *new id*, misses the cache, allocates a
+brand-new GPU texture via `new_static_texture_2d`, and stores it forever -- the
+only removal path is an explicit `GXDestroyTexObj`, which the game issues for
+essentially none of them (222 GXInitTexObj call sites vs 6 GXDestroyTexObj). The
+replacement cache stayed flat at 511 MiB precisely because *replaced* textures
+return a shared handle out of that bounded cache, so the churn only copies a
+shared_ptr; the ~4400 MiB of growth is the *non-replaced* textures each getting a
+fresh GPU allocation per fresh id.
+
+FIX (lowest-risk, mirrors the proven `expire_cached_bind_groups` in
+gfx/common.cpp): age-out entries in `s_textureObjectCaches` that have not been
+resolved for `StaticTextureCacheRetainFrames`, swept every
+`StaticTextureCacheSweepPeriod` frames off `gfx::current_frame()`. Correctness is
+preserved because:
+  * Each cache entry still holds the *exact* texture uploaded for its id -- the
+    sweep never rewrites data, so it can never serve a stale texture.
+  * `lastUsedFrame` is stamped on every hit and on store, so a *stable* texture
+    (re-resolved every frame) never ages out -- only one-shot churn ids do.
+  * The retain window (90 frames = 0.75 s @120 / 1.5 s @60) is far above Dawn's
+    frames-in-flight, and a texture still bound in `g_gxState.textures[]` or held
+    by a cached bind-group view is kept alive by its own shared_ptr / Dawn's
+    internal refcount -- so eviction frees GPU memory only once nothing uses it.
+  * Evicting a static entry runs `clear_texture_dependency` exactly like
+    `evict_texture_object`, keeping the TLUT-user bookkeeping consistent.
+
+This converts unbounded per-frame growth into a bounded working-set window,
+which stops the jetsam. (Eliminating the re-upload *waste* entirely -- content-
+addressing the cache key, or deriving texObjId from content -- is a larger,
+riskier change deferred behind a measurement; fps is already fine, so bounding
+memory is the win that matters now.) The dynamic-palette conv textures under
+`s_tlutObjectCaches` are a separate, far smaller contributor (cleared on
+resize/shutdown) and are left alone pending their own measurement.
+
+Not platform-gated: the leak and the fix are host-agnostic; visionOS just hits
+the jetsam ceiling first. Confined to gx.cpp; no other patch touches it.
+
+--- a/extern/aurora/lib/gx/gx.cpp
++++ b/extern/aurora/lib/gx/gx.cpp
+@@ -67,6 +67,7 @@
+   u32 texDataVersion = 0;
+   u32 tlutObjId = 0;
+   u32 tlutDataVersion = 0;
++  u32 lastUsedFrame = 0;
+ };
+ 
+ struct CachedTlutTextureEntry {
+@@ -127,6 +128,7 @@
+   entry.texDataVersion = obj.texDataVersion;
+   entry.tlutObjId = tlutObjId;
+   entry.tlutDataVersion = tlutDataVersion;
++  entry.lastUsedFrame = gfx::current_frame();
+ 
+   if (tlutObjId != 0) {
+     s_tlutObjectCaches[tlutObjId].staticTextureUsers.insert(obj.texObjId);
+@@ -155,6 +157,44 @@
+     cache.tlutTexture.tlutDataVersion = tlut.tlutDataVersion;
+   }
+   return handle;
++}
++
++// The game re-inits texture objects every frame and GXInitTexObj mints a fresh
++// texObjId each time (dolphin/gx/GXTexture.cpp), so s_textureObjectCaches -- keyed
++// by that id and only ever pruned on an explicit GXDestroyTexObj the game almost
++// never issues -- grows without bound (a fresh GPU texture per fresh id) until the
++// OS jetsam-kills the app. Age out entries not resolved for a while, mirroring the
++// bind-group cache (gfx/common.cpp expire_cached_bind_groups): stable textures are
++// re-resolved every frame so their lastUsedFrame stays current and they survive;
++// one-shot churn ids age out and their sole-owned GPU memory frees. The sweep never
++// touches an entry's data, so it can never serve a stale texture. Retain is well
++// above Dawn frames-in-flight, and anything still bound / referenced by a cached
++// bind-group view stays alive by its own refcount until nothing uses it.
++constexpr u32 StaticTextureCacheRetainFrames = 90;
++constexpr u32 StaticTextureCacheSweepPeriod = 16;
++
++void expire_static_texture_cache() {
++  const u32 frame = gfx::current_frame();
++  if (s_textureObjectCaches.empty() || frame == UINT32_MAX ||
++      frame % StaticTextureCacheSweepPeriod != 0) {
++    return;
++  }
++  // resolve_static_* run many times per frame; sweep at most once per frame.
++  static u32 s_lastSweepFrame = UINT32_MAX;
++  if (frame == s_lastSweepFrame) {
++    return;
++  }
++  s_lastSweepFrame = frame;
++  for (auto it = s_textureObjectCaches.begin(); it != s_textureObjectCaches.end();) {
++    if (frame - it->second.lastUsedFrame > StaticTextureCacheRetainFrames) {
++      // absl flat_hash_map::erase returns void and invalidates only the erased
++      // iterator; advance past it first (as expire_cached_bind_groups does).
++      clear_texture_dependency(it->first, it->second.tlutObjId);
++      s_textureObjectCaches.erase(it++);
++    } else {
++      ++it;
++    }
++  }
+ }
+ 
+ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
+@@ -162,11 +202,13 @@
+   if (s_staticTextureCacheClearPending.exchange(false, std::memory_order_acq_rel)) {
+     do_clear_static_texture_cache();
+   }
++  expire_static_texture_cache();
+ 
+   if (obj.texObjId != 0) {
+     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+-      const auto& entry = it->second;
++      auto& entry = it->second;
+       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0) {
++        entry.lastUsedFrame = gfx::current_frame();
+         return entry.handle;
+       }
+     }
+@@ -196,12 +238,14 @@
+   if (s_staticTextureCacheClearPending.exchange(false, std::memory_order_acq_rel)) {
+     do_clear_static_texture_cache();
+   }
++  expire_static_texture_cache();
+ 
+   if (obj.texObjId != 0) {
+     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+-      const auto& entry = it->second;
++      auto& entry = it->second;
+       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == tlut.tlutObjId &&
+           entry.tlutDataVersion == tlut.tlutDataVersion) {
++        entry.lastUsedFrame = gfx::current_frame();
+         return entry.handle;
+       }
+     }

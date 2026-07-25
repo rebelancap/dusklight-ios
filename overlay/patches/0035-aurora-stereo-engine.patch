@@ -1,0 +1,591 @@
+Overlay patch 0035 (Phase 2 / stereo): the aurora stereo-3D render engine.
+
+STEREO-3D-RECOVERY-FABLE §1. True stereo without the (impossible) fifo replay:
+aurora already records each frame as a FramePacket (every render pass, in order),
+so gfx::end_frame executes that packet TWICE -- LEFT then RIGHT eye -- and the whole
+frame renders again (EFB copies, shadow/reflection passes, everything). The per-eye
+difference is a camera-space X shift injected in the GX vertex shader via a tiny
+@group(3) `stereo` uniform (e, inv_conv); at e=0 it is bit-identical to mono.
+
+Files, one concern (the render-side engine):
+  * gx/shader.cpp      -- the `stereo` uniform + the camera-space eye epilogue.
+  * gx/gx.cpp          -- stereo bind-group layout in the GX pipeline layout; the
+                          TEXGEN-SPLIT per-chain txs policy at the config snapshot
+                          (view-projected chains opt IN to the texcoord shift; world/
+                          untagged stay glued) + the 1 Hz class histogram.
+  * gx/gx.hpp          -- streamed texmtx-class arrays in GXState; TcgConfig._p2 is
+                          the per-chain shift-enable (rides config identity via memcmp).
+  * gx/pipeline.cpp    -- bind @group(3) per GX draw (OFF/LEFT/RIGHT per execution).
+  * gx/command_processor.cpp -- parse the 0x5F8 texgen-class tag; reset a slot's class
+                          on any untagged matrix write to it.
+  * dolphin/gx/GXTransform.cpp -- duskTagTexMtxClass(): the tag as a 1-word XF write
+                          that RIDES THE FIFO adjacent to its matrix load (a global
+                          would desync -- 5 drains/frame, materials queue between).
+  * gfx/common.hpp     -- externs, the (eye,isLast) EndFrameCallback, stereo_set_*.
+  * gfx/common.cpp     -- the buffers/bind groups, per-frame eye apply (on the render
+                          worker -- WriteBuffer from main races submit -> EndBlit
+                          crash, D-035), and the packet re-execution in end_frame.
+
+aurora.cpp drives this (stereo_set_enabled/params + the per-eye callback) in patch
+0032; the camera distance feeding the convergence comes from patch 0036; the J3D
+tag-emission hooks (J3DTexMtxMode -> duskTagTexMtxClass) are patch 0037.
+
+--- a/extern/aurora/lib/gx/shader.cpp
++++ b/extern/aurora/lib/gx/shader.cpp
+@@ -989,7 +989,31 @@
+   if (config.lineMode == 0) {
+     vtxXfrAttrsPre += fmt::format(
+         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+-        "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
++        // visionOS stereo (STEREO-3D-RECOVERY-FABLE §1.1 + FOLLOWUP-ANSWER B): analytic
++        // per-eye disparity in clip space (== the old translate+skew for near/mid), with
++        // a tanh KNEE that soft-compresses only the far side (p>0) so distant water/sky
++        // doesn't push too deep and small far objects stop doubling; near/mid untouched.
++        // Perspective only (ortho/HUD has no w element -> flat on the panel). e=0 == mono.
++        "\n    let sp_persp = (ubuf.proj[2][3] != 0.0 || ubuf.proj[3][2] != 0.0);"
++        // sp_p is hoisted to function scope so the texgen section (WATER-ANSWER fix) can
++        // reuse it to shift the projected texcoord chains by the same per-eye parallax,
++        // scaled by stereo.txs (a slider you tune -- 0 = off).
++        "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;"
++        "\n    var sp_p = 0.0;"
++        "\n    if (sp_persp) {{"
++        // NEAR-FIELD (D-063): softplus dz-floor ALONE (no hard knee). Floors sp_dz to ~s*ln2
++        // as dz->0 (s = kgrad_c = kGrad*C), which caps BOTH the near disparity and its GRADIENT
++        // (d/dz of 1/dz ~ 1/dz^2 explodes as dz->0 -> adjacent near verts tear apart per eye = the
++        // V-split). Smooth everywhere, so it cannot shelf into a step. Was inert until D-061
++        // removed the near knee that used to re-clamp sp_p and mask it.
++        "\n      let sp_dz_raw = max(-mv_pos.z, 1.0);"
++        "\n      var sp_dz = sp_dz_raw;"
++        "\n      if (stereo.kgrad_c > 0.0) {{ sp_dz = stereo.kgrad_c * log(1.0 + exp(min(sp_dz_raw / stereo.kgrad_c, 20.0))); }}"
++        "\n      sp_p = ubuf.proj[0][0] * (stereo.inv_conv - 1.0 / sp_dz);"
++        "\n      let sp_pmax = stereo.kfar * ubuf.proj[0][0] * stereo.inv_conv;"
++        "\n      if (sp_p > 0.0 && sp_pmax > 0.0) {{ sp_p = sp_pmax * tanh(sp_p / sp_pmax); }}"
++        "\n      out.pos.x = out.pos.x + stereo.e * sp_p * out.pos.w;"
++        "\n    }}",
+         vtx_attr(config, GX_VA_POS));
+   } else if (config.lineMode == 3) {
+     // GX_POINTS: expand single vertex to axis-aligned screen-space square
+@@ -1151,11 +1175,22 @@
+       uniBufAttrs += fmt::format("\n    kcolor{}: vec4f,", i);
+     }
+   }
++  // TEXGEN-SPLIT probe: color by POLICY (which chains actually take the txs shift) so
++  // you can SEE the class split live -- the mode tag decided _p2 at the config snapshot.
++  // BLUE = takes the shift (ViewProjmap: the water shine), YELLOW = projective but held
++  // glued (world-projected / untagged: ground overlay, cloud + drop shadows).
++  bool probeShift = false;
++  bool probeGlued = false;
+   for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+     if (!info.sampledTexCoords.test(i)) {
+       continue;
+     }
+     const auto& tcg = config.tcgs[i];
++    if (tcg._p2 != 0) {
++      probeShift = true;
++    } else if (tcg.src == GX_TG_POS || tcg.postMtx != GX_PTIDENTITY) {
++      probeGlued = true;
++    }
+     if (tcg.type == GX_TG_MTX3x4) {
+       vtxOutAttrs += fmt::format("\n    @location({}) tex{}_uvw: vec3f,", vtxOutIdx++, i);
+     } else {
+@@ -1232,6 +1267,23 @@
+           "\n        tc{0}_proj.y += ubuf.line_tex_offset;"
+           "\n    }}",
+           i);
++    }
++    // WATER-ANSWER fix, gated per-chain by TEXGEN-SPLIT-ANSWER §1: texcoords come from
++    // UNSHIFTED mv_pos, i.e. glued to the geometry -- CORRECT for every surface-anchored
++    // layer (terrain overlay, cloud + drop shadows; shifting them lifts shadows off the
++    // ground and tears a step where sp_p saturates). Only view-anchored chains -- the
++    // water's sky-shine, J3DTexMtxMode ViewProjmap, streamed via the 0x5F8 tag into
++    // tcg._p2 at the config snapshot -- opt IN to the txs shift so their feature
++    // disparity matches the mesh. e=0 => no-op in mono. Divisor matches the sample:
++    // 3x4 divides by .z in the fragment, affine 2x4 samples .xy directly.
++    if (tcg._p2 != 0) {
++      if (tcg.type == GX_TG_MTX3x4) {
++        vtxXfrAttrs += fmt::format(
++            "\n    if (sp_persp) {{ tc{0}_proj.x = tc{0}_proj.x + stereo.e * sp_p * stereo.txs * tc{0}_proj.z; }}", i);
++      } else {
++        vtxXfrAttrs += fmt::format(
++            "\n    if (sp_persp) {{ tc{0}_proj.x = tc{0}_proj.x + stereo.e * sp_p * stereo.txs; }}", i);
++      }
+     }
+     if (tcg.type == GX_TG_MTX3x4) {
+       vtxXfrAttrs += fmt::format("\n    out.tex{0}_uvw = tc{0}_proj.xyz;", i);
+@@ -1557,6 +1609,31 @@
+   }
+   if constexpr (EnableNormalVisualization) {
+     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
++  }
++
++  // visionOS stereo probe (TEXGEN-SPLIT-ANSWER): false-color by shift POLICY. RED = ortho
++  // (HUD). GREEN = ordinary texgen (mesh disparity only). BLUE = draw has a chain taking the
++  // txs texcoord shift (ViewProjmap: water shine). YELLOW = projective chain(s) held GLUED
++  // (world-projected / untagged: terrain overlay, cloud + drop shadows). MAGENTA = both kinds
++  // on one draw. Verification: water should read BLUE, ground/shadows YELLOW; if the water
++  // reads YELLOW the mode split mis-fired -- flip "Texture depth on all layers" ON and report.
++  {
++    const char* dbgNonOrtho;
++    if (probeShift && probeGlued) {
++      dbgNonOrtho = "vec4f(1.0, 0.15, 1.0, 1.0)";    // MAGENTA: shifted + glued chains together
++    } else if (probeShift) {
++      dbgNonOrtho = "vec4f(0.15, 0.30, 1.0, 1.0)";   // BLUE: takes the txs shift (view-projected)
++    } else if (probeGlued) {
++      dbgNonOrtho = "vec4f(1.0, 1.0, 0.15, 1.0)";    // YELLOW: projective, held glued (world)
++    } else {
++      dbgNonOrtho = "vec4f(0.15, 1.0, 0.30, 1.0)";   // GREEN: ordinary texgen (mesh)
++    }
++    fragmentFn += fmt::format(
++        "\n    if ((u32(stereo.flags) & 1u) != 0u) {{"
++        "\n      let dbg_persp = (ubuf.proj[2][3] != 0.0 || ubuf.proj[3][2] != 0.0);"
++        "\n      prev = select({}, vec4f(1.0, 0.15, 0.15, 1.0), !dbg_persp);"
++        "\n    }}",
++        dbgNonOrtho);
+   }
+ 
+   const auto shaderSource = fmt::format(R"""(
+@@ -1902,6 +1979,9 @@
+ var<storage, read> abuf: array<u32>;
+ @group(1) @binding(0)
+ var<uniform> ubuf: Uniform;{1}
++struct Stereo {{ e: f32, inv_conv: f32, kfar: f32, flags: f32, txs: f32, knear: f32, kgrad_c: f32, sp_pad2: f32 }};
++@group(3) @binding(0)
++var<uniform> stereo: Stereo;
+ 
+ struct VertexOutput {{
+     @builtin(position) pos: vec4f,{2}
+--- a/extern/aurora/lib/gx/gx.cpp
++++ b/extern/aurora/lib/gx/gx.cpp
+@@ -10,6 +10,13 @@
+ #include "../gfx/texture_convert.hpp"
+ #include "../gfx/texture_replacement.hpp"
+ #include "gx_fmt.hpp"
++
++// dusk stereo (TEXGEN-SPLIT-ANSWER §1): shell toggle -- 0 (default) = only ViewProjmap-
++// tagged chains get the txs texcoord shift ("Texture depth" acts on the water alone);
++// 1 = legacy shift-every-projective-chain, kept as the A/B + recovery path.
++extern "C" volatile int gDusk3DTxsAll;
++// False-color probe flag (also gates the 1 Hz texgen-class histogram log).
++extern "C" volatile int gDusk3DStereoDebug;
+ 
+ #include <absl/container/flat_hash_map.h>
+ #include <absl/container/flat_hash_set.h>
+@@ -802,6 +809,48 @@
+   }
+   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
+     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
++    // TEXGEN-SPLIT-ANSWER §1: per-chain texcoord-shift policy. Texcoords are computed
++    // from UNSHIFTED mv_pos, i.e. glued to the geometry -- correct for every surface-
++    // anchored layer (terrain overlay, cloud + drop shadows). Only view-anchored
++    // content (the water's sky-shine, J3DTexMtxMode ViewProjmap 3/9, streamed via the
++    // 0x5F8 tag) opts IN to the txs shift. Untagged/world chains fail SAFE (glued).
++    auto& tcg = config.shaderConfig.tcgs[i];
++    tcg._p2 = 0;
++    if (tcg.src == GX_TG_POS || tcg.postMtx != GX_PTIDENTITY) {
++      u8 cls = 0;
++      if (tcg.postMtx != GX_PTIDENTITY) {
++        const u32 idx = (static_cast<u32>(tcg.postMtx) - static_cast<u32>(GX_PTTEXMTX0)) / 3;
++        if (idx < MaxPTTexMtx) {
++          cls = g_gxState.ptTexMtxClass[idx];
++        }
++      } else if (tcg.mtx >= GX_TEXMTX0 && tcg.mtx < GX_IDENTITY) {
++        const u32 idx = (static_cast<u32>(tcg.mtx) - static_cast<u32>(GX_TEXMTX0)) / 3;
++        if (idx < MaxTexMtx) {
++          cls = g_gxState.texMtxClass[idx];
++        }
++      }
++      tcg._p2 = (gDusk3DTxsAll != 0 || cls == 3 || cls == 9) ? 1 : 0;
++      // 1 Hz class histogram while the probe is on (Fable's verification gate: water
++      // must read ViewProjmap 3/9; ground overlay + cloud shadows Projmap 2/8; drop
++      // shadows untagged 0). If the water logs Projmap, STOP and report (the flip
++      // needs a second look) -- the "all layers" toggle is the interim recovery.
++      if (gDusk3DStereoDebug != 0) {
++        static std::array<uint32_t, 16> s_clsCount{};
++        static uint32_t s_clsLogFrame = 0;
++        s_clsCount[cls & 15u]++;
++        const uint32_t fr = gfx::current_frame();
++        if (fr - s_clsLogFrame >= 120) {
++          s_clsLogFrame = fr;
++          static Module TcgLog("aurora::gx::tcg");
++          TcgLog.info("dusk3d-tcg: untag {} projB {} vprojB {} proj {} vproj {} other {}",
++                      s_clsCount[0], s_clsCount[2], s_clsCount[3], s_clsCount[8], s_clsCount[9],
++                      s_clsCount[1] + s_clsCount[4] + s_clsCount[5] + s_clsCount[6] +
++                          s_clsCount[7] + s_clsCount[10] + s_clsCount[11] + s_clsCount[12] +
++                          s_clsCount[13] + s_clsCount[14] + s_clsCount[15]);
++          s_clsCount = {};
++        }
++      }
++    }
+   }
+   if (g_gxState.alphaCompare) {
+     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+@@ -928,6 +977,7 @@
+         gfx::g_staticBindGroupLayout,
+         gfx::g_uniformBindGroupLayout,
+         sTextureBindGroupLayout,
++        gfx::g_stereoBindGroupLayout, // @group(3): visionOS stereo eye offset
+     };
+     const wgpu::PipelineLayoutDescriptor desc{
+         .label = "GX Pipeline Layout",
+--- a/extern/aurora/lib/gx/gx.hpp
++++ b/extern/aurora/lib/gx/gx.hpp
+@@ -159,6 +159,9 @@
+   GXPTTexMtx postMtx = GX_PTIDENTITY;
+   bool normalize = false;
+   u8 embossSrc = 0; // Emboss source texcoord (GX_TG_BUMP*)
++  // dusk stereo (TEXGEN-SPLIT-ANSWER §1): 1 = this chain takes the stereo txs texcoord
++  // shift (ViewProjmap-tagged, or legacy-all toggle). Set at the config snapshot from the
++  // streamed class; participates in config identity via memcmp (was padding).
+   u8 _p2 = 0;
+   u8 _p3 = 0;
+ 
+@@ -328,6 +331,12 @@
+   gfx::ClipRect renderScissor{0, 0, 640, 480};
+   std::array<Mat3x4<float>, MaxTexMtx> texMtxs;
+   std::array<Mat3x4<float>, MaxPTTexMtx> ptTexMtxs;
++  // dusk stereo (TEXGEN-SPLIT-ANSWER §1): J3DTexMtxMode class per texmtx slot, streamed
++  // via the 0x5F8 fifo tag adjacent to each matrix load (exact ordering by construction).
++  // 0 = untagged (direct-GX draws e.g. drop shadows -> glued). Reset to 0 whenever the
++  // slot's matrix is rewritten without a tag.
++  std::array<u8, MaxTexMtx> texMtxClass{};
++  std::array<u8, MaxPTTexMtx> ptTexMtxClass{};
+   std::array<TcgConfig, MaxTexCoord> tcgs;
+   std::array<TexCoordScale, MaxTexCoord> texCoordScales;
+   u16 lastVtxSize = 0;
+--- a/extern/aurora/lib/dolphin/gx/GXTransform.cpp
++++ b/extern/aurora/lib/dolphin/gx/GXTransform.cpp
+@@ -112,6 +112,18 @@
+   }
+ }
+ 
++// dusk stereo (TEXGEN-SPLIT-ANSWER §1): tag the JUST-WRITTEN texmtx slot with its
++// J3DTexMtxMode so the config snapshot can split view-projected chains (water shine,
++// takes the stereo txs shift) from world-projected ones (ground overlay, cloud shadows
++// -- glued). A 1-word XF write to scratch 0x5F8 ([0x500,0x5F0) is PT matrix data) that
++// RIDES THE FIFO adjacent to the load -- a plain global would desync: every matrix load
++// is just bytes in the stream, drained ~5x/frame, with materials queued between drains.
++extern "C" void duskTagTexMtxClass(u32 gxMtxId, u32 cls) {
++  GX_WRITE_U8(0x10);
++  GX_WRITE_U32(0x5F8);
++  GX_WRITE_U32((gxMtxId << 8) | (cls & 0xFFu));
++}
++
+ void GXSetViewport(float left, float top, float width, float height, float nearZ, float farZ) {
+   GXSetViewportJitter(left, top, width, height, nearZ, farZ, 1);
+ }
+--- a/extern/aurora/lib/gx/pipeline.cpp
++++ b/extern/aurora/lib/gx/pipeline.cpp
+@@ -7,6 +7,14 @@
+ 
+ namespace aurora::gx {
+ static Module Log("aurora::gx");
++// NEAR-DOUBLING §5: shell selector -- which transparency class to pin to the panel (so the
++// doubling sprites render single). 0=off 1=glows(additive+noZ) 2=no-Z-write 3=transparent
++// (blend or alpha-test) 4=alpha-tested. Defined in DuskHostViewController.m.
++extern "C" volatile int gDusk3DFlatMode;
++// Size gate: only flatten draws with <= this many vertices, so tiny sprites (butterflies,
++// flowers) get pinned but large draws of the same class (ground decals / walking paths) keep
++// their depth. 0 = no limit (flatten the whole class). Defined in DuskHostViewController.m.
++extern "C" volatile int gDusk3DFlatMaxVtx;
+ 
+ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   ZoneScoped;
+@@ -27,6 +35,26 @@
+   if (data.bindGroups.textureBindGroup) {
+     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
+   }
++  // visionOS stereo: @group(3) eye offset for the current execution (OFF/LEFT/RIGHT).
++  // NEAR-DOUBLING §5: pin the transparency class the Flat-mode selects to the mono (OFF,
++  // e=0) offset so those draws render single on the panel. Cycling modes finds the sprite class.
++  const uint8_t sc = data.stereoClass;
++  bool flat = false;
++  switch (gDusk3DFlatMode) {
++    case 1: flat = (sc & 2u) && (sc & 4u); break; // glows: additive (dst=ONE) + no Z-write
++    case 2: flat = (sc & 4u) != 0u; break;        // any no-Z-write
++    case 3: flat = (sc & 1u) || (sc & 8u); break; // transparent: alpha-blended or alpha-tested
++    case 4: flat = (sc & 8u) != 0u; break;        // alpha-tested (cutout)
++    case 5: flat = (sc & 4u) || (sc & 8u); break; // No-Z + cutout: butterflies AND ground specks
++    default: break;
++  }
++  // Size gate: keep the flatten to SMALL draws (butterflies/flowers), not large ones of the
++  // same class (ground decals / walking paths that share no-Z but need their depth).
++  if (flat && gDusk3DFlatMaxVtx > 0 && data.vtxCount > static_cast<uint32_t>(gDusk3DFlatMaxVtx)) {
++    flat = false;
++  }
++  const int stereoIdx = flat ? 0 : gfx::g_stereoEye;
++  pass.SetBindGroup(3, gfx::g_stereoBindGroups[stereoIdx]);
+   pass.SetIndexBuffer(gfx::g_indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+   if (data.dstAlpha != UINT32_MAX) {
+     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
+--- a/extern/aurora/lib/gx/pipeline.hpp
++++ b/extern/aurora/lib/gx/pipeline.hpp
+@@ -14,6 +14,11 @@
+   uint32_t instanceCount;
+   GXBindGroups bindGroups;
+   uint32_t dstAlpha;
++  // visionOS stereo (NEAR-DOUBLING §5): the draw's transparency class, so render() can pin
++  // the doubling sprite class (butterflies/flowers/sparkles) to the panel. Which bits count
++  // as "flatten" is the Flat-mode selector (we don't yet know the exact sprite class).
++  // bit 1 = alpha-blended, bit 2 = additive (dst=ONE), bit 4 = no Z-write, bit 8 = alpha-test.
++  uint8_t stereoClass = 0;
+ };
+ 
+ constexpr uint32_t GXPipelineConfigVersion = 13;
+--- a/extern/aurora/lib/gx/command_processor.cpp
++++ b/extern/aurora/lib/gx/command_processor.cpp
+@@ -268,6 +268,8 @@
+     for (u32 i = 0; i < len; i++) {
+       flat[i] = read_f32(data + i * 4, bigEndian);
+     }
++    // dusk stereo: an untagged load means "not J3D-classified" -- back to unknown/glued.
++    g_gxState.texMtxClass[mtxIdx] = 0;
+     g_gxState.stateDirty = true;
+     return true;
+   } else if (addr >= 0x400 && addr < 0x45A) {
+@@ -290,6 +292,27 @@
+     }
+     g_gxState.stateDirty = true;
+     return true;
++  } else if (addr == 0x5F8) {
++    // dusk stereo (TEXGEN-SPLIT-ANSWER §1): texgen-class tag, emitted adjacent to its
++    // matrix load by duskTagTexMtxClass / the J3D GD hooks (patch 0037), so parse-time
++    // ordering is exact by construction. payload = (GX texmtx id << 8) | J3DTexMtxMode.
++    CHECK(len == 1, "XF: texgen-class tag bad len {}", len);
++    const u32 payload = read_u32(data, bigEndian);
++    const u32 id = payload >> 8;
++    const u32 cls = payload & 0xFFu;
++    if (id >= GX_PTTEXMTX0) {
++      const u32 idx = (id - static_cast<u32>(GX_PTTEXMTX0)) / 3;
++      if (idx < MaxPTTexMtx) {
++        g_gxState.ptTexMtxClass[idx] = static_cast<u8>(cls);
++      }
++    } else if (id >= GX_TEXMTX0) {
++      const u32 idx = (id - static_cast<u32>(GX_TEXMTX0)) / 3;
++      if (idx < MaxTexMtx) {
++        g_gxState.texMtxClass[idx] = static_cast<u8>(cls);
++      }
++    }
++    g_gxState.stateDirty = true;
++    return true;
+   } else if (addr >= 0x500 && addr < 0x5F0) {
+     // Post-transform texture matrices (0x500-0x5EF)
+     u32 ptBase = addr - 0x500;
+@@ -302,6 +325,8 @@
+     for (u32 i = 0; i < len; i++) {
+       flat[startOffset + i] = read_f32(data + i * 4, bigEndian);
+     }
++    // dusk stereo: an untagged load means "not J3D-classified" -- back to unknown/glued.
++    g_gxState.ptTexMtxClass[mtxIdx] = 0;
+     g_gxState.stateDirty = true;
+     return true;
+   } else if (addr >= 0x600 && addr < 0x680) {
+@@ -1687,6 +1712,14 @@
+       .instanceCount = instanceCount,
+       .bindGroups = bindGroups,
+       .dstAlpha = g_gxState.dstAlpha,
++      // NEAR-DOUBLING §5: the draw's transparency class (blend / additive / no-Z / alpha-test)
++      // -- render() flattens whichever class the Flat-mode picks, to find the sprite class.
++      .stereoClass = static_cast<uint8_t>(
++          (g_gxState.blendMode == GX_BM_BLEND ? 1u : 0u) |
++          (g_gxState.blendFacDst == GX_BL_ONE ? 2u : 0u) |
++          (!g_gxState.depthUpdate ? 4u : 0u) |
++          ((g_gxState.alphaCompare.comp0 != GX_ALWAYS || g_gxState.alphaCompare.comp1 != GX_ALWAYS) ? 8u
++                                                                                                     : 0u)),
+   });
+ }
+ 
+--- a/extern/aurora/lib/gfx/common.hpp
++++ b/extern/aurora/lib/gfx/common.hpp
+@@ -190,6 +190,12 @@
+ extern wgpu::BindGroup g_staticBindGroup;
+ extern wgpu::BindGroupLayout g_uniformBindGroupLayout;
+ extern wgpu::BindGroup g_uniformBindGroup;
++// visionOS stereo 3D (STEREO-3D-RECOVERY-FABLE): a tiny per-execution uniform at
++// @group(3) holding the eye offset. Index 0=OFF(e=0)/1=LEFT/2=RIGHT; g_stereoEye is
++// set on the render worker only (begin/end frame) and read by gx::render.
++extern wgpu::BindGroupLayout g_stereoBindGroupLayout;
++extern std::array<wgpu::BindGroup, 3> g_stereoBindGroups;
++extern int g_stereoEye;
+ 
+ using BindGroupRef = HashType;
+ using PipelineRef = HashType;
+@@ -210,8 +216,19 @@
+ 
+ struct TextureRef;
+ using TextureHandle = std::shared_ptr<TextureRef>;
+-using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;
++// eye: 0 for the sole/left composite, 1 for the right (stereo second execution).
++// isLast: finalize (submit/present/pace) on this call -- true for the sole/last eye.
++using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, int eye, bool isLast)>;
+ 
++// visionOS stereo 3D (STEREO-3D-RECOVERY-FABLE). When enabled, end_frame executes
++// the recorded frame packet TWICE (LEFT then RIGHT eye offset) and invokes the
++// callback once per eye. stereo_set_params updates the LEFT/RIGHT eye offset each
++// frame: halfSep = camera-space half eye-separation, invConv = 1/convergence dist.
++void stereo_set_enabled(bool on);
++void stereo_set_params(float halfSep, float invConv, float kFar, float kNear, float kGradC);
++void stereo_set_debug(bool on); // WATER-ANSWER §D false-color probe (flags bit 0)
++void stereo_set_texamt(float amt); // WATER-ANSWER projected-texcoord shift strength (slot 4; 0=off)
++
+ enum class ShaderType : uint8_t {
+   Clear = 0,
+   GX = 1,
+--- a/extern/aurora/lib/gfx/common.cpp
++++ b/extern/aurora/lib/gfx/common.cpp
+@@ -210,6 +210,20 @@
+ wgpu::BindGroup g_staticBindGroup;
+ wgpu::BindGroupLayout g_uniformBindGroupLayout;
+ wgpu::BindGroup g_uniformBindGroup;
++
++// visionOS stereo 3D: @group(3) eye-offset uniform (0=OFF,1=LEFT,2=RIGHT).
++wgpu::BindGroupLayout g_stereoBindGroupLayout;
++std::array<wgpu::Buffer, 3> g_stereoBuffers;
++std::array<wgpu::BindGroup, 3> g_stereoBindGroups;
++int g_stereoEye = 0;            // render-worker-only; read by gx::render
++static std::atomic<bool> g_stereoEnabled{false};   // set on main, read on the worker
++static std::atomic<float> g_stereoHalfSep{0.f};    // set on main, applied on the worker
++static std::atomic<float> g_stereoInvConv{0.f};
++static std::atomic<float> g_stereoKFar{0.5f};      // far-depth knee (FOLLOWUP-ANSWER B)
++static std::atomic<bool> g_stereoDbg{false};       // WATER-ANSWER §D false-color probe (flags bit 0)
++static std::atomic<float> g_stereoTexAmt{0.f};     // WATER-ANSWER fix: projected-texcoord shift strength (slot 4; 0=off)
++static std::atomic<float> g_stereoKNear{1.f};      // near-disparity knee (slot 5; V-doubling clamp, Near-depth slider)
++static std::atomic<float> g_stereoKGradC{0.f};     // softplus dz-floor s=kGrad*C (slot 6; slope-step smoothing)
+ 
+ // for imgui debug
+ AuroraStats g_stats{};
+@@ -1472,6 +1486,43 @@
+     };
+     g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+   }
++  {
++    // visionOS stereo: @group(3) eye-offset uniform. Three buffers (OFF/LEFT/RIGHT),
++    // 32 bytes each (e, inv_conv, kfar, flags, txs, pad*3). All zero at init => e=0 =>
++    // bit-identical mono until stereo_set_params updates LEFT/RIGHT and _set_enabled turns on.
++    constexpr wgpu::BindGroupLayoutEntry layoutEntry{
++        .binding = 0,
++        // Fragment too: the WATER-ANSWER §D false-color probe reads stereo.dbg in fs_main.
++        .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
++        .buffer = wgpu::BufferBindingLayout{.type = wgpu::BufferBindingType::Uniform},
++    };
++    const wgpu::BindGroupLayoutDescriptor layoutDesc{
++        .label = "Stereo bind group layout",
++        .entryCount = 1,
++        .entries = &layoutEntry,
++    };
++    g_stereoBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++    for (size_t i = 0; i < g_stereoBuffers.size(); ++i) {
++      const wgpu::BufferDescriptor bufDesc{
++          .label = "Stereo uniform",
++          .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
++          .size = 32,
++          .mappedAtCreation = true,
++      };
++      g_stereoBuffers[i] = g_device.CreateBuffer(&bufDesc);
++      auto* p = static_cast<float*>(g_stereoBuffers[i].GetMappedRange(0, 32));
++      for (int j = 0; j < 8; ++j) { p[j] = 0.f; }
++      g_stereoBuffers[i].Unmap();
++      const wgpu::BindGroupEntry entry{.binding = 0, .buffer = g_stereoBuffers[i], .size = 32};
++      const wgpu::BindGroupDescriptor bgDesc{
++          .label = "Stereo bind group",
++          .layout = g_stereoBindGroupLayout,
++          .entryCount = 1,
++          .entries = &entry,
++      };
++      g_stereoBindGroups[i] = g_device.CreateBindGroup(&bgDesc);
++    }
++  }
+ 
+   gx::initialize();
+ #ifdef AURORA_ENABLE_RMLUI
+@@ -1644,6 +1695,32 @@
+     static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
+     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
+     webgpu::gpu_prof::frame_begin(g_framePackets[frameSlot].encoder);
++    // Stereo: the incremental encode of this frame's ops uses the LEFT eye (OFF when
++    // stereo is disabled). end_frame flips to RIGHT for the second execution.
++    g_stereoEye = g_stereoEnabled.load() ? 1 : 0;
++    {
++      // Apply the per-frame eye offset HERE (on the worker) -- writing the queue from
++      // the main thread races the worker's submit and crashes in EndBlit. Queue-
++      // ordered before this frame's commands, so the draws see the current values.
++      const float hs = g_stereoHalfSep.load();
++      const float ic = g_stereoInvConv.load();
++      // index 2 = kfar: the far-depth knee (shader tanh-compresses the far side to this
++      // fraction of the natural far asymptote). FOLLOWUP-ANSWER B.
++      const float kf = g_stereoKFar.load();
++      // slot 3 = flags bitmask (WATER-ANSWER): bit 0 = false-color probe. slot 4 = txs, the
++      // projected-texcoord shift strength (the slider; 0=off). Written into ALL three
++      // buffers (incl. OFF, whose e=0 keeps mono bit-identical) so the probe reads in 2D/sim.
++      const float md = (g_stereoDbg.load() ? 1.f : 0.f);
++      const float ta = g_stereoTexAmt.load();
++      const float kn = g_stereoKNear.load(); // slot 5 = near-disparity knee
++      const float kg = g_stereoKGradC.load(); // slot 6 = softplus dz-floor s = kGrad*C
++      const std::array<float, 8> off{0.f, ic, kf, md, ta, kn, kg, 0.f};
++      const std::array<float, 8> left{-hs, ic, kf, md, ta, kn, kg, 0.f};
++      const std::array<float, 8> right{hs, ic, kf, md, ta, kn, kg, 0.f};
++      g_queue.WriteBuffer(g_stereoBuffers[0], 0, off.data(), sizeof(off));
++      g_queue.WriteBuffer(g_stereoBuffers[1], 0, left.data(), sizeof(left));
++      g_queue.WriteBuffer(g_stereoBuffers[2], 0, right.data(), sizeof(right));
++    }
+   });
+   g_cpuFrameStart = PresentClock::now();
+   return true;
+@@ -1714,7 +1791,6 @@
+     s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+     auto encoder = std::move(packet.encoder);
+     const auto stats = packet.stats;
+-    packet = {};
+     g_stats.drawCallCount = stats.drawCallCount;
+     g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+     g_stats.lastVertSize = stats.lastVertSize;
+@@ -1722,9 +1798,27 @@
+     g_stats.lastIndexSize = stats.lastIndexSize;
+     g_stats.lastStorageSize = stats.lastStorageSize;
+     g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
++    // The LEFT eye was rendered incrementally into `encoder` (g_stereoEye==1, or OFF).
++    // Composite it (eye 0). Then in stereo, RE-EXECUTE the whole recorded packet with
++    // the RIGHT eye offset and composite that (eye 1). packet.ops carries every pass in
++    // encode order, so this renders the complete frame a second time -- no fifo replay,
++    // no drain interception. Ordering in the command stream: LEFT frame -> eye0 resample
++    // -> RIGHT frame (overwrites the shared targets) -> eye1 resample.
++    const bool stereo = g_stereoEnabled.load();
+     if (callback) {
+-      callback(encoder);
++      callback(encoder, 0, /*isLast=*/!stereo);
+     }
++    if (stereo) {
++      g_stereoEye = 2; // RIGHT
++      for (const auto& op : packet.ops) {
++        encode_op(encoder, packet, op);
++      }
++      g_stereoEye = 1; // restore LEFT for the next frame's incremental encode
++      if (callback) {
++        callback(encoder, 1, /*isLast=*/true);
++      }
++    }
++    packet = {};
+     g_frameSlots.release(frameSlot);
+     expire_cached_bind_groups();
+     map_staging_buffer(stagingSlot, true);
+@@ -1734,6 +1828,21 @@
+ 
+ uint32_t current_frame() noexcept { return g_frameIndex; }
+ 
++void stereo_set_enabled(bool on) { g_stereoEnabled.store(on); }
++
++void stereo_set_params(float halfSep, float invConv, float kFar, float kNear, float kGradC) {
++  // Store only; the render worker writes the GPU buffers in begin_frame (writing the
++  // queue from this main thread would race the worker's submit).
++  g_stereoHalfSep.store(halfSep);
++  g_stereoInvConv.store(invConv);
++  g_stereoKFar.store(kFar > 0.f ? kFar : 0.5f);
++  g_stereoKNear.store(kNear > 0.f ? kNear : 1.0f);
++  g_stereoKGradC.store(kGradC >= 0.f ? kGradC : 0.f);
++}
++
++void stereo_set_debug(bool on) { g_stereoDbg.store(on); } // WATER-ANSWER §D false-color probe
++void stereo_set_texamt(float amt) { g_stereoTexAmt.store(amt); } // WATER-ANSWER projected-texcoord shift strength
++
+ static void expire_cached_bind_groups() {
+   std::lock_guard lock{g_bindGroupCacheMutex};
+   if (g_cachedBindGroups.empty() || g_frameIndex == UINT32_MAX || g_frameIndex % BindGroupCacheSweepPeriod != 0) {

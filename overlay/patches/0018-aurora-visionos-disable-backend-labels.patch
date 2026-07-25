@@ -1,0 +1,71 @@
+Overlay patch 0018: force-disable Dawn's backend-label toggle on visionOS.
+
+THE real texture-pack crash -- and it was never a memory problem. The device
+instrumentation (patch 0017) proved it: at the first replacement-texture creation
+there are ~4100 MiB available and footprint is <1 GB, yet it aborts with
+std::bad_alloc. bad_alloc with 4 GB free is not exhaustion -- it is one absurd
+allocation. Backtrace:
+
+    ...APICreateTexture -> metal::Texture::CreateMetalTextureDescriptor
+      -> metal::MakeDebugName -> absl::StrFormat("%s_%s", prefix, label)
+      -> std::bad_alloc -> abort (SIGABRT), on the FIRST replacement texture
+
+`MakeDebugName` (dawn UtilsMetal.mm) formats the texture's user label into an
+NSString ONLY when the `use_user_defined_labels_in_backend` toggle is enabled.
+aurora sets replacement labels via `.label = label.c_str()`; the WebGPU C++
+`StringView(const char*)` ctor stores `length = WGPU_STRLEN` (SIZE_MAX). On device
+that reaches StrFormat as a SIZE_MAX-length view -> ~16-exabyte string -> bad_alloc.
+The game's own textures never trip it in practice, but every pack's first
+replacement texture does (any format), which is why the game runs fine WITHOUT a
+pack and dies the instant it creates its first replacement.
+
+The FIRST attempt only removed the toggle from aurora's *enable* list -- a no-op:
+Dawn's default for it is "false unless backend validation is enabled, in which
+case true" (Toggles.cpp), and it stayed on, so the crash persisted (build d3de…).
+This version **explicitly adds it to the *disable* list** on visionOS, forcing it
+off regardless of the default. `MakeDebugName` then returns just the prefix and
+never formats the label. Cosmetic Metal-frame-capture aid; every other platform
+keeps it.
+
+Sim confirms non-regression (textures create, clamp fires, footprint flat, 0
+crashes); the crash is device-only so the sim cannot prove the fix, only that
+nothing broke. Ships with a diagnostic (patch 0019) that logs the crashing
+texture's size/format/label, so if it somehow still aborts we see exactly what.
+
+Three hunks: TargetConditionals include, enable-list gate (kept), disable-list add.
+
+--- a/extern/aurora/lib/webgpu/gpu.cpp
++++ b/extern/aurora/lib/webgpu/gpu.cpp
+@@ -8,6 +8,10 @@
+ #include <string_view>
+ #include <utility>
+ #include <vector>
++
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
+ 
+ #include <aurora/aurora.h>
+ #include <aurora/gfx.h>
+@@ -942,7 +946,7 @@
+         "skip_validation",
+         "disable_robustness",
+ #endif
+-#ifndef ANDROID
++#if !defined(ANDROID) && !(defined(__APPLE__) && TARGET_OS_VISION)
+         "use_user_defined_labels_in_backend",
+ #endif
+         "allow_unsafe_apis",
+@@ -952,6 +956,12 @@
+     };
+     constexpr std::array disableToggles{
+         "timestamp_quantization",
++#if defined(__APPLE__) && TARGET_OS_VISION
++        // Force OFF: MakeDebugName formats the user label, aurora sets replacement
++        // labels via `.label = c_str()` -> StringView length = WGPU_STRLEN (SIZE_MAX)
++        // -> StrFormat bad_alloc on device. Default is on here; disable explicitly.
++        "use_user_defined_labels_in_backend",
++#endif
+     };
+     wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
+         .nextInChain = &cacheDescriptor,

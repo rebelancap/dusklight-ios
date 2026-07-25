@@ -1,0 +1,167 @@
+Overlay patch 0026: glue the visionOS UIWindow/root view to the scene's real
+geometry (fixes the off-center top+right clip; enables resize-to-fill).
+
+ROOT CAUSE (WINDOW-BRIEF / WINDOW-ANSWER-FABLE.md): on visionOS the *scene*
+owns the panel geometry (user-resizable, size restored by the system), but
+SDL3's UIKit backend models a virtual 1280x720 display and never reconciles
+with the scene:
+
+- `UIKit_ComputeViewFrame` (visionOS) returns CGRectMake(window->x, window->y,
+  w, h) -- SDL's window position on the FAKE display leaks in as a frame
+  origin. A centered 1216x896 request on the virtual 1280x720 display yields
+  origin (32, -88): gap left, clip top; a user panel narrower/taller than that
+  rect adds the right clip and bottom gap. Exactly the observed asymmetry.
+- Nothing observes scene-geometry changes, so `SDL_GetWindowSizeInPixels`
+  (root view bounds x hardcoded 2.0) never changes on a panel resize -- which
+  is why patch 0022's per-frame resize_swapchain() poll saw nothing.
+
+SoH hit the identical bug ("the content renders cropped/offset") and fixed it
+in its SDL2 compat patch by setting `self.frame = scene.coordinateSpace.bounds`
+in the UIWindow's layoutSubviews (Shipwright-ios overlay patch 0021, SDL_uikitwindow.m
+hunk). SDL3 exposes the UIWindow via SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, so we
+apply the same glue from aurora each frame instead of patching SDL:
+
+  scene.coordinateSpace.bounds -> uiwindow.frame -> root view frame ->
+  SDL metal-view layoutSubviews -> drawableSize = bounds x 2 ->
+  patch 0022's resize_swapchain() poll picks up the new pixel size ->
+  Dawn reconfigures -> present viewport fills the panel.
+
+Both frame fixes are idempotent per-frame compares (no-ops when already in
+sync, e.g. in the simulator where the scene matches the request). The window
+is also late-adopted onto the scene if it was created before the scene
+connected (SDL's fallback 1280x720 window path). Every change -- and the first
+call -- logs a geometry snapshot to the app file log, so the next device log
+is the artifact that settles the model.
+
+--- a/extern/aurora/lib/dawn/MetalBinding.mm
++++ b/extern/aurora/lib/dawn/MetalBinding.mm
+@@ -34,3 +34,86 @@
+   return std::move(desc);
+ }
+ } // namespace aurora::webgpu::utils
++
++#if TARGET_OS_VISION
++#include <SDL3/SDL_properties.h>
++#include <SDL3/SDL_video.h>
++#include <cstdio>
++
++namespace aurora::window {
++// visionOS: the scene owns the panel geometry (user-resizable), but SDL3 builds
++// the window/view frames from its virtual 1280x720 display coordinates and never
++// reconciles them with the scene -- the render shows cropped/offset, and panel
++// resizes change nothing (SoH hit the identical bug; its SDL2 compat patch glues
++// the UIWindow to scene.coordinateSpace.bounds in layoutSubviews). SDL3 hands us
++// the UIWindow via properties, so the glue lives here instead of an SDL patch.
++// Returns true when `desc` holds a line worth logging (first call, scene
++// adoption, or an actual frame fix); idempotent no-op otherwise.
++bool sync_visionos_window_geometry(SDL_Window* sdlWindow, char* desc, size_t descSize) {
++  UIWindow* uiwindow = (__bridge UIWindow*)SDL_GetPointerProperty(
++      SDL_GetWindowProperties(sdlWindow), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
++  if (uiwindow == nil) {
++    return false;
++  }
++  UIWindowScene* scene = uiwindow.windowScene;
++  bool adopted = false;
++  if (scene == nil) {
++    // The SDL window can be created before the scene connects (SDL then falls
++    // back to a bare 1280x720 UIWindow); adopt the scene once it exists.
++    for (UIScene* s in UIApplication.sharedApplication.connectedScenes) {
++      if ([s isKindOfClass:[UIWindowScene class]]) {
++        scene = (UIWindowScene*)s;
++        uiwindow.windowScene = scene;
++        adopted = true;
++        break;
++      }
++    }
++  }
++  if (scene == nil) {
++    return false;
++  }
++  const CGRect sceneBounds = scene.coordinateSpace.bounds;
++  if (sceneBounds.size.width <= 0 || sceneBounds.size.height <= 0) {
++    return false;
++  }
++  bool changed = adopted;
++  if (!CGRectEqualToRect(uiwindow.frame, sceneBounds)) {
++    uiwindow.frame = sceneBounds;
++    changed = true;
++  }
++  // Either frame can be the stale carrier: the window (created against the
++  // virtual display) or the root view (framed from SDL window x/y). Fix both;
++  // the SDL metal view is the root view, so its layoutSubviews re-derives the
++  // drawable from the corrected bounds.
++  UIView* root = uiwindow.rootViewController.view;
++  if (root != nil && !CGRectEqualToRect(root.frame, uiwindow.bounds)) {
++    root.frame = uiwindow.bounds;
++    changed = true;
++  }
++  // Rounded corners: without this the metal view draws SQUARE corners over the
++  // system glass (VISION-PRO-LUS-PLAYBOOK.md #1.4, verified on device). Match the
++  // system window look; masksToBounds clips the drawable to the radius. Idempotent
++  // -- only set when it has drifted, so the per-frame glue stays a no-op.
++  if (root != nil && root.layer.cornerRadius != 46.0) {
++    root.layer.cornerRadius = 46.0;
++    root.layer.cornerCurve = kCACornerCurveContinuous;
++    root.layer.masksToBounds = YES;
++  }
++  static bool s_logged_initial = false;
++  if (!changed && s_logged_initial) {
++    return false;
++  }
++  s_logged_initial = true;
++  const CGRect wf = uiwindow.frame;
++  const CGRect vf = root != nil ? root.frame : CGRectZero;
++  std::snprintf(desc, descSize,
++                "scene %.0fx%.0f | window (%.0f,%.0f %.0fx%.0f) | view (%.0f,%.0f %.0fx%.0f)%s%s",
++                (double)sceneBounds.size.width, (double)sceneBounds.size.height,
++                (double)wf.origin.x, (double)wf.origin.y, (double)wf.size.width,
++                (double)wf.size.height, (double)vf.origin.x, (double)vf.origin.y,
++                (double)vf.size.width, (double)vf.size.height,
++                adopted ? " [adopted scene]" : "", changed ? " [glued]" : "");
++  return true;
++}
++} // namespace aurora::window
++#endif
+--- a/extern/aurora/lib/window.cpp
++++ b/extern/aurora/lib/window.cpp
+@@ -1,5 +1,9 @@
+ #include "window.hpp"
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #ifdef AURORA_ENABLE_GX
+ #include "imgui.hpp"
+ #include "webgpu/gpu.hpp"
+@@ -226,6 +230,30 @@
+ const AuroraEvent* poll_events() {
+   ZoneScoped;
+   g_events.clear();
++
++#if defined(__APPLE__) && TARGET_OS_VISION
++  // visionOS: SDL3 never reconciles the UIWindow/root-view frames with the
++  // scene's real (user-resizable) geometry -- the render shows cropped/offset
++  // and never re-fits. Glue the frames to the scene each frame (idempotent;
++  // defined in dawn/MetalBinding.mm), then poll the swapchain into sync:
++  // SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED is not delivered on panel resize, and
++  // resize_swapchain() early-outs when the size is unchanged, so this is cheap.
++  // When the glue (or a resize) changes the metal view, the framebuffers
++  // re-create and the game refits (fill + resize-redraw).
++  bool sync_visionos_window_geometry(SDL_Window* sdlWindow, char* desc, size_t descSize);
++  static char s_visionGeometryDesc[224];
++  static char s_lastVisionGeometryLog[224];
++  if (sync_visionos_window_geometry(g_window, s_visionGeometryDesc, sizeof(s_visionGeometryDesc))) {
++    // SDL's updateKeyboard re-plants the stale frame on keyboard events; if that
++    // ever loops against the glue, identical lines would flood the file log --
++    // only log when the geometry description actually changes.
++    if (SDL_strcmp(s_visionGeometryDesc, s_lastVisionGeometryLog) != 0) {
++      Log.info("window: visionOS geometry {}", s_visionGeometryDesc);
++      SDL_strlcpy(s_lastVisionGeometryLog, s_visionGeometryDesc, sizeof(s_lastVisionGeometryLog));
++    }
++  }
++  resize_swapchain();
++#endif
+ 
+   SDL_Event event;
+   // Clear out the previous scroll values to prevent ghost input

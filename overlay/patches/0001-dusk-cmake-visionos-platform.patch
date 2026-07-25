@@ -1,0 +1,170 @@
+Overlay patch 0001: teach dusklight's CMake about visionOS (xrOS).
+
+ios.toolchain.cmake already supports PLATFORM=VISIONOS/SIMULATOR_VISIONOS and
+sets VISIONOS=ON, IOS=OFF, CMAKE_SYSTEM_NAME=visionOS. But the tree dispatches
+on IOS/TVOS only, so visionOS falls into the *desktop macOS* branches: it looks
+for AppKit (macOS-only -> configure failure), builds the macOS file-select, and
+skips the UIKit paths it should take. visionOS is a UIKit-family platform, so
+it wants the iOS-side code, not the macOS side.
+
+Mirrors the existing tvOS normalization hack at the top of CMakeLists.txt and
+follows the tree's own convention of a distinct platform variable per platform
+(rather than forcing IOS=ON, which would leak into SDL3/Dawn subprojects that do
+their own platform detection and have real visionOS support of their own).
+
+The visionOS resource dir is indirected through DUSK_VISIONOS_RESOURCE_DIR so
+the port's Info.plist/icons can live outside the vendor tree (upstream stays
+pristine); it defaults to platforms/visionos.
+
+Discord is gated OUT on visionOS: the SDK ships no xros slice.
+
+The Apple exports/stub step is skipped on visionOS entirely. symgen (a pinned
+prebuilt third-party binary, encounter/symgen v1.2.3) cannot read xrOS Mach-O
+objects -- it scans them, reports "0 exports from 2053 objects", and then hard
+-fails with "No symbols in dusklight_exports.exp". It also rejects
+`--platform visionos` outright ("expected macos, ios, or tvos"), so there is no
+flag that makes it work. That step exists only to let code mods link against the
+game (DUSK_ENABLE_CODE_MODS, default OFF); the game links fine without it. The
+patch fails loudly if code mods are requested on visionOS rather than silently
+producing an empty exports list. Revisit via SYMGEN_PATH.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -19,6 +19,12 @@
+     set(TVOS ON)
+     set(IOS OFF)
+ endif ()
++if (APPLE AND NOT VISIONOS AND CMAKE_SYSTEM_NAME STREQUAL visionOS)
++    # Same hack for visionOS: the toolchain sets VISIONOS, but
++    # CMAKE_SYSTEM_NAME is re-derived per sub-project().
++    set(VISIONOS ON)
++    set(IOS OFF)
++endif ()
+ 
+ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
+     # If the Xcode SDK is lagging behind system version, CMake needs this done first
+@@ -374,7 +380,7 @@
+     set(DUSK_ENABLE_DISCORD_DEFAULT ${DUSK_ENABLE_DISCORD_RPC})
+ endif ()
+ option(DUSK_ENABLE_DISCORD "Enable Discord Rich Presence support" ${DUSK_ENABLE_DISCORD_DEFAULT})
+-if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS)
++if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS AND NOT VISIONOS)
+     list(APPEND GAME_COMPILE_DEFS DUSK_DISCORD=1)
+ endif ()
+ 
+@@ -490,7 +496,23 @@
+ if (WIN32)
+     target_link_libraries(dusklight PRIVATE Psapi)
+ endif ()
+-if (APPLE)
++if (APPLE AND VISIONOS)
++    # symgen (pinned prebuilt, encounter/symgen v1.2.3) cannot read xrOS
++    # Mach-O objects: it reports "0 exports from 2053 objects" and then
++    # fails with "No symbols in dusklight_exports.exp". The exports list
++    # and the -bundle_loader stub exist only so *code mods* can link
++    # against the game; the game itself links fine without
++    # -exported_symbols_list. Skip the step rather than ship a silently
++    # empty exports list. Revisit by pointing SYMGEN_PATH at an
++    # xrOS-aware symgen build.
++    if (DUSK_ENABLE_CODE_MODS)
++        message(FATAL_ERROR
++            "dusklight: DUSK_ENABLE_CODE_MODS is not supported on visionOS yet "
++            "(symgen ${_SYMGEN_VERSION} emits no exports for xrOS objects). "
++            "Configure with -DDUSK_ENABLE_CODE_MODS=OFF.")
++    endif ()
++    message(STATUS "dusklight: skipping Apple exports/stub on visionOS (no code mods)")
++elseif (APPLE)
+     include(cmake/AppleExports.cmake)
+     setup_apple_exports(dusklight)
+ elseif (ANDROID)
+@@ -573,6 +595,11 @@
+ if (APPLE)
+     if (IOS)
+         set(DUSK_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios)
++    elseif (VISIONOS)
++        if (NOT DUSK_VISIONOS_RESOURCE_DIR)
++            set(DUSK_VISIONOS_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/visionos)
++        endif ()
++        set(DUSK_RESOURCE_DIR ${DUSK_VISIONOS_RESOURCE_DIR})
+     elseif (TVOS)
+         set(DUSK_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/tvos)
+     else ()
+@@ -612,13 +639,48 @@
+         list(APPEND _apple_bundle_properties
+             XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS ${DUSK_ENTITLEMENTS})
+     endif ()
+-    if (NOT IOS AND NOT TVOS)
++    if (NOT IOS AND NOT TVOS AND NOT VISIONOS)
+         list(APPEND _apple_bundle_properties
+             XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES")
+     endif ()
+     set_target_properties(dusklight PROPERTIES ${_apple_bundle_properties})
+ 
+-    if (NOT IOS AND NOT TVOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")
++    if (VISIONOS)
++        if (PLATFORM STREQUAL "SIMULATOR_VISIONOS")
++            set(CMAKE_Swift_COMPILER_TARGET "arm64-apple-xros${CMAKE_OSX_DEPLOYMENT_TARGET}-simulator")
++        else ()
++            set(CMAKE_Swift_COMPILER_TARGET "arm64-apple-xros${CMAKE_OSX_DEPLOYMENT_TARGET}")
++        endif ()
++        enable_language(Swift)
++        # Swift in its OWN static lib: a .swift source on the dusklight target
++        # inherits the game C warning flags (COMPILE_LANGUAGE genexes are ignored
++        # for Swift) and swiftc hard-errors. The flag-clean target sidesteps it.
++        add_library(dusk_visionswift STATIC "${DUSK_VISIONOS_RESOURCE_DIR}/DuskVisionApp.swift")
++        set_target_properties(dusk_visionswift PROPERTIES Swift_LANGUAGE_VERSION 5)
++        target_compile_options(dusk_visionswift PRIVATE
++            "$<$<COMPILE_LANGUAGE:Swift>:-import-objc-header;${DUSK_VISIONOS_RESOURCE_DIR}/Dusk-Bridging-Header.h>")
++        # ObjC shell (host VC boot, immersive-loop stubs, pre-main beacon).
++        target_sources(dusklight PRIVATE
++            "${DUSK_VISIONOS_RESOURCE_DIR}/DuskHostViewController.m"
++            "${DUSK_VISIONOS_RESOURCE_DIR}/DuskImmersive.m"
++            "${DUSK_VISIONOS_RESOURCE_DIR}/DuskLaunchBeacon.m")
++        target_include_directories(dusklight PRIVATE "${DUSK_VISIONOS_RESOURCE_DIR}")
++        target_compile_definitions(dusklight PRIVATE DUSK_SWIFT_MAIN=1)
++        # Swift @main supplies main(); force_load pulls it from the archive (a
++        # raw -force_load flag carries no build-order dep). The dusklight target
++        # has no Swift sources, so give it the Swift runtime path + rpath itself.
++        add_dependencies(dusklight dusk_visionswift)
++        target_link_libraries(dusklight PRIVATE
++            "-Wl,-force_load,$<TARGET_FILE:dusk_visionswift>"
++            "-framework CompositorServices"
++            "-framework ARKit"
++            "-framework AVFAudio")
++        target_link_options(dusklight PRIVATE
++            "SHELL:-L ${CMAKE_OSX_SYSROOT}/usr/lib/swift"
++            "SHELL:-Wl,-rpath,/usr/lib/swift")
++    endif ()
++
++    if (NOT IOS AND NOT TVOS AND NOT VISIONOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")
+         set(_sign_nested_commands)
+         if (TARGET crashpad_handler)
+             list(APPEND _sign_nested_commands
+@@ -635,14 +697,14 @@
+     endif ()
+ endif ()
+ 
+-if (APPLE AND NOT IOS AND NOT TVOS)
++if (APPLE AND NOT IOS AND NOT TVOS AND NOT VISIONOS)
+     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+     target_sources(dusklight PRIVATE src/dusk/file_select_macos.mm)
+     set_source_files_properties(src/dusk/file_select_macos.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+     target_link_libraries(dusklight PRIVATE ${APPKIT_FRAMEWORK})
+ endif ()
+ 
+-if (IOS)
++if (IOS OR VISIONOS)
+     find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
+     find_library(UNIFORM_TYPE_IDENTIFIERS_FRAMEWORK UniformTypeIdentifiers REQUIRED)
+     target_sources(dusklight PRIVATE src/dusk/ios/FileSelectDialog.m)
+--- a/cmake/DetectVersion.cmake
++++ b/cmake/DetectVersion.cmake
+@@ -105,6 +105,8 @@
+ macro(configure_version_header)
+     if (CMAKE_SYSTEM_NAME STREQUAL Windows)
+         set(PLATFORM_NAME win32)
++    elseif (VISIONOS)
++        set(PLATFORM_NAME visionos)
+     elseif (CMAKE_SYSTEM_NAME STREQUAL Darwin)
+         if (IOS)
+             set(PLATFORM_NAME ios)

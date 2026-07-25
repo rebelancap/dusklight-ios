@@ -1,0 +1,350 @@
+Overlay patch 0032 (Phase 2 / M2->M3): engine goes offscreen + phase-locks in 3D.
+
+STEREO-3D-GUIDE §3.5 (offscreen) + §3.7 (pacing) + §9.1 #5. While the immersive
+space is open, app/visionos/DuskImmersive.m owns drawing to the CompositorServices
+drawable. aurora's own frame loop must, when gDusk3DMode != 0:
+
+  1. NOT acquire the parked 2D window's swapchain texture -- on device that
+     drawable acquire can stall forever ("a hang, not a glitch"). Skip the
+     acquire; the game still renders + submits its frame (so M3 can redirect that
+     render into the eye textures), it is simply not blitted/presented.
+  2. NOT run the surface-error handling on the (intentionally) empty acquire --
+     that path would drop/reconfigure the surface every frame.
+  3. NOT spam "Skipping present" every frame.
+  4. Phase-lock to the compositor instead of free-running: with no present to
+     pace it the loop hit ~650 fps in the sim (heat for nothing). The immersive
+     loop signals once per compositor frame (dusk3d_pace_signal, right after its
+     cp_time_wait_until); aurora blocks on dusk3d_wait_for_compositor_frame in the
+     render-worker end-frame callback, BEFORE the frame slot releases, so the
+     whole pipeline (and thus the main game loop, which paces on slot
+     availability) runs at the compositor cadence. 50 ms timeout inside the wait
+     so a dead/paused compositor never hangs the game.
+
+gDusk3DMode + dusk3d_wait_for_compositor_frame are declared at FILE scope (a
+block-scope `extern` mangles under C++ -- guide §9.4 #36); the flag is defined in
+DuskHostViewController.m and the pace fns in DuskImmersive.m. visionOS-gated;
+every other platform keeps the exact present path. This is the surface half of
+the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
+
+--- a/extern/aurora/lib/aurora.cpp
++++ b/extern/aurora/lib/aurora.cpp
+@@ -125,6 +125,9 @@
+     g_config.resourcesPath = strdup(g_config.resourcesPath);
+   }
+   if (g_config.msaa == 0) {
++    // NB: MSAA > 1 aborts under TP -- aurora does not support depth-tex copies from
++    // multisampled EFB targets, which TP issues. Crisp edges come from the render-scale
++    // (Sharpness) supersample instead, which also antialiases. See D-036.
+     g_config.msaa = 1;
+   }
+   if (g_config.maxTextureAnisotropy == 0) {
+@@ -251,6 +254,39 @@
+ #endif
+   return window::poll_events();
+ }
++
++#if defined(__APPLE__) && TARGET_OS_VISION
++// In 3D the immersive loop owns rendering to the compositor; the game must not
++// acquire the parked 2D window's drawable (it can stall -- guide 9.1 #5) and
++// must pace to the compositor instead of free-running (guide 3.7). gDusk3DMode
++// is defined in DuskHostViewController.m; the pace wait in DuskImmersive.m.
++extern "C" volatile int gDusk3DMode;
++extern "C" volatile int gDusk3DEye;
++extern "C" void dusk3d_wait_for_compositor_frame(void);
++// M3/M4: render the composited game frame into an eye IOSurface texture the
++// immersive loop samples on the panel (defined in this file, patch 0034).
++void dusk3d_eye_render(const wgpu::CommandEncoder& encoder, int eye);
++// Stereo params: gDusk3DCamDist is TP's eye->look-at distance (dusk, frame_interp);
++// gDusk3DSep is the Depth-slider fraction (shell, DuskHostViewController.m).
++extern "C" volatile float gDusk3DCamDist;
++extern "C" volatile float gDusk3DCamDistLink; // eye->getPlayer(0)->current.pos (readout candidate P0cur)
++// NEAR-DOUBLING readout probe (§A): 3 more eye->Link candidates -- pick the ONE that's smooth,
++// 200-600, below camDistLA. P0=getPlayer(0), PL=getLinkPlayer; cur=current.pos, eye=eyePos.
++extern "C" volatile float gDusk3DLinkP0Eye;
++extern "C" volatile float gDusk3DLinkPLCur;
++extern "C" volatile float gDusk3DLinkPLEye;
++extern "C" volatile float gDusk3DSep;
++extern "C" volatile float gDusk3DFarDepth; // far-depth knee kFar (shell slider, 0.25-1.0)
++extern "C" volatile float gDusk3DNearDepth; // near-depth knee kNear (shell slider; V-doubling clamp)
++extern "C" volatile float gDusk3DKGrad;     // softplus dz-floor factor (shell slider; slope-step smoothing)
++extern "C" volatile int gDusk3DStereoDebug; // WATER-ANSWER §D false-color probe (shell toggle)
++extern "C" volatile float gDusk3DTexAmt;    // WATER-ANSWER projected-texcoord shift strength (shell slider; 0=off)
++// FPS/RmlUi overlay for the 3D panel: the end-frame callback stashes the frame's rml
++// layer here so the eye render can composite it -- the 2D present blit that normally
++// draws it (FPS counter, toasts) is suppressed in 3D. Worker-thread only.
++wgpu::BindGroup s_dusk3dRmlBindGroup;
++bool s_dusk3dRmlOverlay = false;
++#endif
+ 
+ bool begin_frame() noexcept {
+   ZoneScoped;
+@@ -284,6 +320,56 @@
+ #ifdef AURORA_ENABLE_GX
+   gx::fifo::drain();
+   gfx::finish();
++#if defined(__APPLE__) && TARGET_OS_VISION
++  // visionOS 3D: render the frame for both eyes (packet re-execution in gfx::end_frame).
++  gfx::stereo_set_enabled(gDusk3DMode != 0);
++  gfx::stereo_set_debug(gDusk3DStereoDebug != 0); // outside the mode gate: probe reads in 2D too
++  gfx::stereo_set_texamt(gDusk3DTexAmt);
++  if (gDusk3DMode != 0) {
++    // Convergence C = smoothed camera->subject distance (STEREO-3D-RECOVERY §2.2):
++    // separation shrinks with C, so interiors (small C, near walls) stay comfortable
++    // and zero-parallax tracks the subject. Fallback + clamp until camdist telemetry
++    // (below) calibrates the range for TP's world scale.
++    // Subject-anchored convergence (STEP-AND-SHADOWS-ANSWER §A/§B): the subject is Link's HEAD
++    // (eyePos) -- the readout candidate the device log showed smooth + at/below the look-at
++    // (getPlayer(0) == getLinkPlayer here; feet/current.pos run larger). Cap at the look-at so
++    // C never sits FARTHER than the aim point (guards rare outlier frames). Puts Link on the
++    // panel and gives the shader's softplus dz-floor the near-field it needs to kill the slope
++    // step. (The earlier eye->Link backfire was reading current.pos, which came back garbage.)
++    const float linkHead = gDusk3DLinkP0Eye;   // eye -> Link.eyePos
++    const float camDistLA = gDusk3DCamDist;
++    float camDist = (linkHead > 1.0f) ? std::min(linkHead, camDistLA) : camDistLA;
++    if (!(camDist > 1.0f)) {
++      camDist = 800.0f;
++    }
++    camDist = std::clamp(camDist, 80.0f, 4000.0f);
++    static float s_convSmooth = 0.0f;
++    s_convSmooth = s_convSmooth <= 0.0f ? camDist : s_convSmooth + (camDist - s_convSmooth) * 0.08f;
++    const float C = s_convSmooth;
++    const float depthFrac = gDusk3DSep;    // Depth slider (0 at OFF)
++    float kFar = gDusk3DFarDepth;          // Far Depth slider (knee)
++    if (!(kFar > 0.0f)) {
++      kFar = 0.5f;
++    }
++    float kNear = gDusk3DNearDepth;        // Near Depth slider (near clamp; V-doubling)
++    if (!(kNear > 0.0f)) {
++      kNear = 1.0f;
++    }
++    // Softplus dz-floor (STEP-AND-SHADOWS-ANSWER §C): floors the effective near depth at
++    // ~kGrad*C*ln2 so the near-ground disparity gradient can't get steep enough to tear into a
++    // step on a slope -- C-inf smooth, no shelf edge. Pass s = kGrad*C; shader does the softplus.
++    float kGrad = gDusk3DKGrad;            // Slope smoothing slider (0 = off)
++    if (!(kGrad >= 0.0f)) {
++      kGrad = 0.0f;
++    }
++    gfx::stereo_set_params(depthFrac * C, 1.0f / C, kFar, kNear, kGrad * C);
++    static int s_camLog = 0;
++    if ((s_camLog++ % 120) == 0) {
++      Log.info("dusk3d: camDistLA {} P0cur {} P0eye {} PLcur {} PLeye {} C {} kNear {}", camDistLA,
++               gDusk3DCamDistLink, gDusk3DLinkP0Eye, gDusk3DLinkPLCur, gDusk3DLinkPLEye, C, kNear);
++    }
++  }
++#endif
+   auto imguiDrawData = imgui::freeze();
+ 
+   const auto& presentSource = webgpu::present_source();
+@@ -302,13 +388,20 @@
+ #endif
+ 
+   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+-                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
++                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder, int eye,
++                                                            bool isLast) {
+     wgpu::Texture currentTexture;
+     wgpu::TextureView currentView;
+     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
++    bool present3DSuppressed = false;
++#if defined(__APPLE__) && TARGET_OS_VISION
++    // 3D mode: the immersive loop owns rendering; do not touch the parked 2D
++    // window's drawable (guide 9.1 #5). The game still renders + submits below.
++    present3DSuppressed = (gDusk3DMode != 0);
++#endif
+     {
+       window::SurfaceLock surfaceLock;
+-      if (window::is_presentable() && g_surface) {
++      if (window::is_presentable() && g_surface && !present3DSuppressed) {
+         ZoneScopedN("Acquire texture");
+         wgpu::SurfaceTexture surfaceTexture;
+         g_surface.GetCurrentTexture(&surfaceTexture);
+@@ -378,9 +471,20 @@
+         imgui::render(pass, imguiDrawData);
+         pass.End();
+       }
++    } else if (present3DSuppressed) {
++#if defined(__APPLE__) && TARGET_OS_VISION
++      s_dusk3dRmlBindGroup = rmlBindGroup; // FPS/toast overlay -> composited onto the eye
++      s_dusk3dRmlOverlay = rmlOverlay;
++      dusk3d_eye_render(encoder, eye); // eye 0 (LEFT) or 1 (RIGHT, stereo re-execution)
++#endif
+     } else {
+       Log.info("Skipping present; window not presentable");
+     }
++    // Stereo executes the frame twice; finalize (submit/present/pace) only on the
++    // last eye so the single command encoder is finished exactly once.
++    if (!isLast) {
++      return;
++    }
+     webgpu::gpu_prof::frame_end(encoder);
+     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+@@ -404,7 +508,7 @@
+         Log.warn("Surface present failed");
+         webgpu::release_surface();
+       }
+-    } else if (g_surface) {
++    } else if (g_surface && !present3DSuppressed) {
+       switch (surfaceStatus) {
+       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+         Log.warn("Surface texture acquisition timed out");
+@@ -448,10 +552,159 @@
+     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
+     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
+     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
++#if defined(__APPLE__) && TARGET_OS_VISION
++    if (present3DSuppressed) {
++      // Phase-lock to the compositor (guide 3.7): with no present to pace it the
++      // loop free-runs (~650 fps -> heat). The immersive loop signals once per
++      // compositor frame; block here, before the frame slot releases, so the game
++      // loop (which paces on slot availability) runs at the compositor rate.
++      dusk3d_wait_for_compositor_frame();
++      // Record a frame tick so the FPS overlay works in 3D -- calculate_fps() reads
++      // present timestamps, and present is suppressed here, so it would read 0.
++      gfx::after_present();
++    }
++#endif
+   });
+ 
+ #endif
+ }
++
++#if defined(__APPLE__) && TARGET_OS_VISION
++#include <IOSurface/IOSurfaceRef.h>
++extern "C" void* volatile gDusk3DEyeSurfaces[2];
++extern "C" volatile int gDusk3DEyeFrames[2];
++extern "C" volatile int gDusk3DEyeW;
++extern "C" volatile int gDusk3DEyeH;
++extern "C" volatile int gDusk3DEye = 0; // 0=OFF, 1=LEFT, 2=RIGHT (read by shader_info.cpp)
++
++wgpu::SharedTextureMemory s_dusk3dEyeStm[2];
++wgpu::Texture s_dusk3dEyeTex[2];
++uint32_t s_dusk3dEyeTexW[2] = {0, 0};
++uint32_t s_dusk3dEyeTexH[2] = {0, 0};
++bool s_dusk3dEyeInitialized[2] = {false, false};
++
++void dusk3d_eye_render(const wgpu::CommandEncoder& encoder, int eye) {
++  if (eye < 0 || eye > 1) {
++    return;
++  }
++  // M5 crispness: size the eye to the GAME-RENDER resolution (present_source / fb),
++  // NOT the tiny parked 2D window (native_fb / surfaceConfiguration). With the 3D
++  // render scale cranked the game renders high-res, so the eye is a 1:1 crisp copy.
++  const auto srcSz = webgpu::present_source().size;
++  const uint32_t w = srcSz.width;
++  const uint32_t h = srcSz.height;
++  if (w == 0 || h == 0) {
++    return;
++  }
++  if (!s_dusk3dEyeTex[eye] || s_dusk3dEyeTexW[eye] != w || s_dusk3dEyeTexH[eye] != h) {
++    const size_t bpr = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, static_cast<size_t>(w) * 4u);
++    const int32_t v_w = static_cast<int32_t>(w);
++    const int32_t v_h = static_cast<int32_t>(h);
++    const int32_t v_bpe = 4;
++    const int32_t v_bpr = static_cast<int32_t>(bpr);
++    const int32_t v_pf = 0x42475241; // 'BGRA'
++    const void* keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement,
++                          kIOSurfaceBytesPerRow, kIOSurfacePixelFormat};
++    CFNumberRef nums[] = {CFNumberCreate(nullptr, kCFNumberSInt32Type, &v_w),
++                          CFNumberCreate(nullptr, kCFNumberSInt32Type, &v_h),
++                          CFNumberCreate(nullptr, kCFNumberSInt32Type, &v_bpe),
++                          CFNumberCreate(nullptr, kCFNumberSInt32Type, &v_bpr),
++                          CFNumberCreate(nullptr, kCFNumberSInt32Type, &v_pf)};
++    CFDictionaryRef props =
++        CFDictionaryCreate(nullptr, keys, reinterpret_cast<const void**>(nums), 5,
++                           &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    IOSurfaceRef ios = IOSurfaceCreate(props);
++    CFRelease(props);
++    for (CFNumberRef n : nums) {
++      CFRelease(n);
++    }
++    if (ios == nullptr) {
++      Log.warn("dusk3d: IOSurfaceCreate failed {}x{}", w, h);
++      return;
++    }
++    wgpu::SharedTextureMemoryIOSurfaceDescriptor ioDesc{};
++    ioDesc.ioSurface = ios;
++    wgpu::SharedTextureMemoryDescriptor stmDesc{};
++    stmDesc.nextInChain = &ioDesc;
++    s_dusk3dEyeStm[eye] = g_device.ImportSharedTextureMemory(&stmDesc);
++    wgpu::TextureDescriptor td{};
++    td.size = {w, h, 1};
++    td.format = wgpu::TextureFormat::BGRA8Unorm;
++    td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
++    s_dusk3dEyeTex[eye] = s_dusk3dEyeStm[eye].CreateTexture(&td);
++    s_dusk3dEyeTexW[eye] = w;
++    s_dusk3dEyeTexH[eye] = h;
++    s_dusk3dEyeInitialized[eye] = false;
++    gDusk3DEyeSurfaces[eye] = ios; // owned by the STM (+ the loop's MTLTexture once wrapped)
++    gDusk3DEyeW = static_cast<int>(w);
++    gDusk3DEyeH = static_cast<int>(h);
++    // Drop the create-ref: the SharedTextureMemory holds its own ref, and once the
++    // immersive loop wraps this surface its MTLTexture holds another, so the surface
++    // outlives any in-flight use and is freed only when BOTH release it. Without this
++    // a resize (e.g. dragging Sharpness) leaks the old IOSurface every recreation.
++    CFRelease(ios);
++    Log.info("dusk3d: eye {} IOSurface {}x{} imported", eye, w, h);
++  }
++  if (!s_dusk3dEyeTex[eye]) {
++    return;
++  }
++  wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
++  beginDesc.initialized = s_dusk3dEyeInitialized[eye];
++  beginDesc.concurrentRead = false;
++  if (!s_dusk3dEyeStm[eye].BeginAccess(s_dusk3dEyeTex[eye], &beginDesc)) {
++    Log.warn("dusk3d: eye {} BeginAccess failed", eye);
++    return;
++  }
++  const auto& src = webgpu::present_source();
++  const auto eyeViewport = webgpu::calculate_present_viewport(w, h, src.size.width, src.size.height);
++  const auto& resampled = webgpu::resample_present_source(encoder, eyeViewport);
++  const auto bindGroup = webgpu::create_copy_bind_group(resampled);
++  const auto eyeView = s_dusk3dEyeTex[eye].CreateView();
++  const std::array attachments{wgpu::RenderPassColorAttachment{
++      .view = eyeView,
++      .loadOp = wgpu::LoadOp::Clear,
++      .storeOp = wgpu::StoreOp::Store,
++      .clearValue = wgpu::Color{0.0, 0.0, 0.0, 1.0},
++  }};
++  const wgpu::RenderPassDescriptor rpd{
++      .label = "Dusk3D eye render",
++      .colorAttachmentCount = attachments.size(),
++      .colorAttachments = attachments.data(),
++  };
++  const auto pass = encoder.BeginRenderPass(&rpd);
++  pass.SetPipeline(webgpu::g_CopyPipeline);
++  pass.SetBindGroup(0, bindGroup, 0, nullptr);
++  set_present_viewport(pass, eyeViewport, w, h);
++  pass.Draw(3);
++  // Composite the RmlUi overlay (FPS counter, toasts) so it shows on the 3D panel.
++  if (s_dusk3dRmlBindGroup && s_dusk3dRmlOverlay) {
++    pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
++    pass.SetBindGroup(0, s_dusk3dRmlBindGroup, 0, nullptr);
++    pass.Draw(3);
++  }
++  pass.End();
++  wgpu::SharedTextureMemoryEndAccessState endState{};
++  s_dusk3dEyeStm[eye].EndAccess(s_dusk3dEyeTex[eye], &endState);
++  s_dusk3dEyeInitialized[eye] = true;
++  gDusk3DEyeFrames[eye] = gDusk3DEyeFrames[eye] + 1; // publish (simple; race device-only §9.7)
++}
++
++// M5: render-scale bridge for the shell's Sharpness slider. Cranks the game's
++// internal render resolution (aurora's frame-buffer scale, a multiplier on the
++// GC render-mode size) so the eye copy is crisp on the room-scale panel; the tiny
++// parked 2D window is unaffected. 0 = native (restored on 3D exit for cheap 2D).
++extern "C" void Dusk3D_SetRenderScale(float scale) {
++  window::set_frame_buffer_scale(scale);
++}
++
++// Force the render aspect to the panel's so the game renders AT the panel shape
++// (undistorted at any width/height, like 2D) instead of being stretched onto the
++// quad. 0 = native window aspect (restored on 3D exit).
++extern "C" void Dusk3D_SetPanelAspect(float aspect) {
++  window::set_frame_buffer_aspect_override(aspect);
++}
++#endif
++
+ } // namespace
+ } // namespace aurora
+ 

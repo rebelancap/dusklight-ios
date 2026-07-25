@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en-US</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleExecutable</key>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+    <key>CFBundleIdentifier</key>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+    <key>CFBundleName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleDisplayName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleVersion</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+
+    <!-- visionOS: XROS, device family 7. NOT LSRequiresIPhoneOS. -->
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+      <string>XROS</string>
+    </array>
+    <key>UIDeviceFamily</key>
+    <array>
+      <integer>7</integer>
+    </array>
+    <key>MinimumOSVersion</key>
+    <string>${DEPLOYMENT_TARGET}</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.adventure-games</string>
+
+    <!-- Two icon lookups, two contexts, both required:
+         * The LAUNCHER (Home View) wants the LAYERED icon and finds it via
+           CFBundleIconName -> the AppIcon.solidimagestack in Assets.car (built by
+           scripts/build-vision-icon.py). A flat icon here gives a blank *tile* --
+           that is the trap the original comment warned about.
+         * 2D / legacy-UIKit contexts (the Files-app folder badge, Settings, the
+           share sheet) do NOT read the layered stack; they resolve the icon
+           through the classic CFBundleIcons / CFBundlePrimaryIcon key. With only
+           CFBundleIconName present those contexts have nothing to render -> the
+           Files folder showed a BLANK icon. Every shipped visionOS reference app
+           (vkQuake, quake3e, q2repro) declares BOTH keys for exactly this reason.
+         Declaring both is additive: the stack still wins for the launcher, and
+         CFBundleIconName inside CFBundlePrimaryIcon points the 2D lookup at the
+         same AppIcon (its auto-flattened opaque image) so the folder renders it. -->
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIcons</key>
+    <dict>
+      <key>CFBundlePrimaryIcon</key>
+      <dict>
+        <key>CFBundleIconName</key>
+        <string>AppIcon</string>
+        <key>CFBundleIconFiles</key>
+        <array>
+          <string>AppIcon60x60</string>
+        </array>
+      </dict>
+    </dict>
+
+    <!-- Phase 2 (ImmersiveSpace) requires this; openImmersiveSpace fails
+         .error without it, before makeConfiguration is called. Harmless in
+         Phase 1, and it must be true before the SwiftUI @main graft lands. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+      <key>UIApplicationSupportsMultipleScenes</key>
+      <true/>
+    </dict>
+
+    <!-- Gamepad + indirect input. The GCEventInteraction claim (guide 1.3) is
+         code-side; this key is the plist half of pad handling. -->
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+
+    <!-- Game data drop-off: the user's own disc dump / texture packs land in
+         Documents via Files.app. An EMPTY Documents dir hides the app in
+         Files, so the shell seeds a readme at first launch (guide 1.5). -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+</dict>
+</plist>

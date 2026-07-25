@@ -1,0 +1,40 @@
+{
+  "_comment": "In-repo SideStore source. The Action (../.github/workflows/build-sources.yml) runs generate.py on a schedule (and on release), reads THIS repo's latest GitHub release, and commits the refreshed apps-visionos.json next to this file. This port is Apple Vision Pro only, so only the visionOS source carries an app; apps-ios.json is generated empty. The visionOS IPA is the release asset whose name contains 'vision' (dusklight-<ver>-visionOS.ipa).",
+  "sources": {
+    "ios": {
+      "name": "Dusklight — iPhone & iPad",
+      "identifier": "com.rebelancap.dusklight.ios",
+      "subtitle": "Twilight Princess, natively",
+      "description": "Placeholder iOS source. This port is Apple Vision Pro only — use the visionOS source.",
+      "website": "https://github.com/rebelancap/dusklight-ios",
+      "tintColor": "#C9A227",
+      "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/source-icon.png"
+    },
+    "visionos": {
+      "name": "Dusklight — Apple Vision Pro",
+      "identifier": "com.rebelancap.dusklight.visionos",
+      "subtitle": "Twilight Princess in 2D and stereoscopic 3D",
+      "description": "The Legend of Zelda: Twilight Princess on Apple Vision Pro — a free-floating 2D window and a world-locked stereoscopic 3D mode. Bring your own GameCube disc.",
+      "website": "https://github.com/rebelancap/dusklight-ios",
+      "tintColor": "#C9A227",
+      "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/source-icon.png"
+    }
+  },
+  "apps": [
+    {
+      "name": "Dusklight",
+      "bundleIdentifier": "com.rebelancap.dusklight",
+      "repo": "rebelancap/dusklight-ios",
+      "developerName": "rebelancap",
+      "subtitle": "The Legend of Zelda: Twilight Princess for Apple Vision Pro",
+      "localizedDescription": "The Legend of Zelda: Twilight Princess on Apple Vision Pro: the full GameCube game rendered natively on Metal, in a free-floating 2D window and a world-locked stereoscopic 3D mode with foveated rendering, spatial audio anchored to the screen, and live-tunable screen size, distance, and depth. Ships with no game content; you supply your own GameCube Twilight Princess disc image.",
+      "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/dusklight.png",
+      "tintColor": "#C9A227",
+      "iosMinOS": "16.0",
+      "visionosMinOS": "2.0",
+      "screenshotURLs": [
+        "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/docs/screenshots/visionos-2d-title.jpg"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+Overlay patch 0014: pin the visionOS UI density ratio so menus don't overflow.
+
+THE menu-cropping bug, correctly diagnosed at last. Device screenshots
+(tmp/IMG_0138/0139) show the prelaunch menu rendered far too big: the logo is
+huge and only the top two rows (SELECT DISC IMAGE/PLAY + SETTINGS) fit -- MODS,
+QUIT, the disc status and the version line are all pushed off the bottom. Both
+menu states (disc loaded and not) are affected. The window aspect is fine (~4:3,
+same as the sim); this is purely SCALE.
+
+Root cause is the RmlUi density ratio. The prelaunch/settings UI is laid out in
+`dp` (density-independent points) against a reference window of ~1216x896 dp --
+see res/rml/prelaunch.rcss: fixed `428dp` buttons, `48dp`/`12dp` gaps, and the
+`@media (min-width: 1216dp)` breakpoint that switches the eyebrow to vw sizing.
+`sync_context_metrics` sets the ratio from `window::get_window_size().scale`.
+
+On the SIMULATOR the window happens to be exactly 1216 dp wide (native_fb 3840,
+scale 3.158), so the menu composes perfectly -- which is why every sim screenshot
+looked right and the bug never reproduced there. On the DEVICE the app runs in a
+free-floating panel that is much smaller in *points*; SDL's display scale then
+drives the density ratio up (dp-width ~600-700 from the screenshots), so the
+dp-fixed elements (which do not shrink below their dp size) consume most of the
+window and overflow.
+
+Fix (visionOS only): stop deriving the ratio from the fickle window point-size.
+Pin it to the reference dp footprint the design targets, computed from the actual
+render dimensions:
+
+    ratio = min(longEdge / 1216, shortEdge / 896)
+
+min() of the two axes guarantees the 1216x896 dp footprint fits BOTH width and
+height, for any panel size or aspect. This makes the menu composition
+panel-size-invariant -- always the layout the simulator shows -- instead of
+blowing up on a small panel. `s_uiScale` (an explicit user override) still wins
+when set.
+
+Verification note: on the sim this is a *no-op* (native_fb 3840x2829 ->
+min(3840/1216, 2829/896) = 3.157 ~= the current 3.158), so the sim confirms
+non-regression but cannot exercise the device path (it is already at the
+reference). The logic is small and self-adjusting; a device log line
+(`visionOS UI density ratio ...`) is emitted so the numbers can be confirmed on
+hardware.
+
+Isolated to the RmlUi density ratio; gameplay (GX/imgui) is untouched. Two hunks:
+the TargetConditionals include and the ratio computation.
+
+--- a/extern/aurora/lib/rmlui.cpp
++++ b/extern/aurora/lib/rmlui.cpp
+@@ -3,6 +3,10 @@
+ #include <algorithm>
+ #include <thread>
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <RmlUi/Core.h>
+ #include <RmlUi/Core/Element.h>
+ #include <RmlUi_Backend.h>
+@@ -63,8 +67,34 @@
+   }
+   if (g_context->GetDimensions() != dimensions) {
+     g_context->SetDimensions(dimensions);
++  }
++#if defined(__APPLE__) && TARGET_OS_VISION
++  // The prelaunch/settings UI is laid out in `dp` against a reference window of
++  // ~1216x896 dp (res/rml/prelaunch.rcss: fixed 428dp buttons, the
++  // `@media (min-width: 1216dp)` breakpoint). On visionOS the window is a
++  // free-floating panel whose size in *points* varies, so deriving the density
++  // ratio from window scale makes the dp-fixed menu overflow on a panel that is
++  // small in points (logo huge, MODS/QUIT/version clipped). Pin the ratio to the
++  // reference footprint instead, from the actual render dimensions; min() of the
++  // two axes fits the footprint in both width and height, any aspect.
++  constexpr float kUiRefLongEdgeDp = 1216.0f;
++  constexpr float kUiRefShortEdgeDp = 896.0f;
++  const float longEdge = static_cast<float>(std::max(dimensions.x, dimensions.y));
++  const float shortEdge = static_cast<float>(std::min(dimensions.x, dimensions.y));
++  const float ratio = s_uiScale > 0.0f
++                          ? s_uiScale
++                          : std::max(0.25f, std::min(longEdge / kUiRefLongEdgeDp,
++                                                     shortEdge / kUiRefShortEdgeDp));
++  static bool loggedRatio = false;
++  if (!loggedRatio) {
++    loggedRatio = true;
++    Log.info("visionOS UI density ratio {} for render {}x{} -> {}x{} dp", ratio, dimensions.x,
++             dimensions.y, static_cast<int>(std::lround(dimensions.x / ratio)),
++             static_cast<int>(std::lround(dimensions.y / ratio)));
+   }
++#else
+   const float ratio = s_uiScale > 0.0f ? s_uiScale : window::get_window_size().scale;
++#endif
+   if (g_context->GetDensityIndependentPixelRatio() != ratio) {
+     g_context->SetDensityIndependentPixelRatio(ratio);
+   }

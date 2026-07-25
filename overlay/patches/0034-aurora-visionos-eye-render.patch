@@ -1,0 +1,27 @@
+Overlay patch 0034 (Phase 2 / M3+M4): enable Dawn's shared-texture-memory features.
+
+STEREO-3D-GUIDE §3.4, Q-004 interop. The eye-render (patch 0032, aurora.cpp) imports
+the composited game frame into an IOSurface-backed wgpu::Texture via
+device.ImportSharedTextureMemory. Dawn requires the SharedTextureMemoryIOSurface
+feature (+ SharedFenceMTLSharedEvent for fenced hand-off) to be enabled at device
+creation or the import aborts. Enable them where the adapter advertises them.
+
+Kept separate from 0032 because it touches a different file (webgpu/gpu.cpp) with no
+adjacency to 0032's aurora.cpp hunks.
+
+--- a/extern/aurora/lib/webgpu/gpu.cpp
++++ b/extern/aurora/lib/webgpu/gpu.cpp
+@@ -915,6 +915,13 @@
+         }
+         requiredFeatures.push_back(feature);
+       }
++      // Phase 2 (visionOS 3D): the eye-render imports the game frame via an
++      // IOSurface-backed shared texture (+ MTLSharedEvent fences). Enable the
++      // features where the adapter has them so ImportSharedTextureMemory is granted.
++      if (feature == wgpu::FeatureName::SharedTextureMemoryIOSurface ||
++          feature == wgpu::FeatureName::SharedFenceMTLSharedEvent) {
++        requiredFeatures.push_back(feature);
++      }
+ #ifdef TRACY_ENABLE
+       if (feature == wgpu::FeatureName::TimestampQuery) {
+         requiredFeatures.push_back(feature);

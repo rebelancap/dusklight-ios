@@ -1,0 +1,34 @@
+Overlay patch 0008: let the bundle identifier be overridden for signing.
+
+CMakeLists.txt hardcodes:
+
+    set(DUSK_BUNDLE_IDENTIFIER dev.twilitrealm.dusk)
+
+A plain set() creates a *normal* variable that shadows any -D cache value, so the
+identifier cannot be overridden from the command line at all.
+
+That matters for signing. `dev.twilitrealm.dusk` is upstream's namespace, and
+Apple App IDs are globally unique, so a downstream signing identity generally
+cannot register or sign it. This makes the identifier a build-time override
+(`-DDUSK_BUNDLE_IDENTIFIER=...`) so a device build can sign under its own team
+and id without touching the vendor tree.
+
+Guarded so it is completely inert upstream: without an override the identifier is
+byte-for-byte what it was. Same pattern as DUSK_VISIONOS_RESOURCE_DIR in patch
+0001 -- keep the port's local facts out of the vendor tree.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -320,7 +320,11 @@
+ # TODO: version handling for res includes
+ 
+ set(DUSK_BUNDLE_NAME Dusklight)
+-set(DUSK_BUNDLE_IDENTIFIER dev.twilitrealm.dusk)
++# Overridable: Apple App IDs are globally unique, so a downstream signing
++# identity cannot use upstream's namespace. Inert unless -D is passed.
++if (NOT DUSK_BUNDLE_IDENTIFIER)
++    set(DUSK_BUNDLE_IDENTIFIER dev.twilitrealm.dusk)
++endif ()
+ set(DUSK_COMPANY_NAME "Twilit Realm")
+ set(DUSK_FILE_DESCRIPTION "Dusklight")
+ set(DUSK_PRODUCT_NAME "Dusklight")

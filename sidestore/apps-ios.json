@@ -1,0 +1,11 @@
+{
+  "name": "Dusklight \u2014 iPhone & iPad",
+  "identifier": "com.rebelancap.dusklight.ios",
+  "subtitle": "Twilight Princess, natively",
+  "description": "Placeholder iOS source. This port is Apple Vision Pro only \u2014 use the visionOS source.",
+  "website": "https://github.com/rebelancap/dusklight-ios",
+  "tintColor": "#C9A227",
+  "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/source-icon.png",
+  "apps": [],
+  "news": []
+}

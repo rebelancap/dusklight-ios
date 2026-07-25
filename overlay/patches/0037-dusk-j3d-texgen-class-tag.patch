@@ -1,0 +1,92 @@
+Overlay patch 0037 (Phase 2 / stereo): J3D texgen-class tag emission.
+
+TEXGEN-SPLIT-ANSWER §1. The 2x2 texgen-bit probe proved the water shine and the
+terrain overlay are the SAME (src==POS && projective postMtx) class -- the bits
+cannot split view-projected chains (water: keep the txs texcoord shift) from
+world-projected ones (ground overlay, cloud shadows: must stay glued or they lift
+off the ground / tear the step). But TP's material system still KNOWS the intent
+at runtime: J3DTexMtxMode (Projmap 2/8 = world, ViewProjmap 3/9 = view) is read
+at every matrix load site. These hooks emit that mode as a 1-word XF tag to
+scratch 0x5F8, ADJACENT to the matrix load in the same byte stream (GD display
+list or immediate fifo), so aurora's drain-time parser (patch 0035) gets exact
+load->class ordering by construction -- a plain global would desync across the
+materials queued between drains (~5 drains/frame).
+
+Two files, all four load choke points, TARGET_PC-gated (established practice,
+d_drawlist.cpp): J3DTevs.cpp (matblock GD path: loadTexMtx / loadPostTexMtx) and
+J3DShapeMtx.cpp (per-shape differed path: the PT and TEXMTX GXLoadTexMtxImm sites,
+which have the mode in scope as sp_4c / tex_gen_src).
+
+Direct-GX draws (e.g. dDlst_shadowControl_c drop shadows) never tag -> class 0 ->
+glued, which is the correct fail-safe default (TEXGEN-SPLIT-ANSWER "class policy").
+
+--- a/libs/JSystem/src/J3DGraphBase/J3DTevs.cpp
++++ b/libs/JSystem/src/J3DGraphBase/J3DTevs.cpp
+@@ -447,13 +447,33 @@
+ }
+ 
+ void J3DTexMtx::loadTexMtx(u32 param_0) const {
++#ifdef TARGET_PC
++    // dusk stereo (TEXGEN-SPLIT-ANSWER §1): tag the load with its J3DTexMtxMode so aurora
++    // can split view-projected chains (water shine -- takes the stereo "Texture depth"
++    // shift) from world-projected ones (terrain overlay, cloud shadows -- stay glued to
++    // the ground). The 9-byte tag rides the display list ADJACENT to the load; a plain
++    // global would desync across the materials queued between fifo drains.
++    GDOverflowCheck(0x35 + 9);
++	J3DGDLoadTexMtxImm((MtxP)mMtx, param_0 * 3 + 30, (GXTexMtxType)mTexMtxInfo.mProjection);
++    J3DGDWriteXFCmdHdr(0x5F8, 1);
++    J3DGDWrite_u32((u32)((param_0 * 3 + 30) << 8) | (u32)(mTexMtxInfo.mInfo & 0x3f));
++#else
+     GDOverflowCheck(0x35);
+ 	J3DGDLoadTexMtxImm((MtxP)mMtx, param_0 * 3 + 30, (GXTexMtxType)mTexMtxInfo.mProjection);
++#endif
+ }
+ 
+ void J3DTexMtx::loadPostTexMtx(u32 param_0) const {
++#ifdef TARGET_PC
++    // dusk stereo (TEXGEN-SPLIT-ANSWER §1): class tag rides adjacent -- see loadTexMtx.
++    GDOverflowCheck(0x35 + 9);
++    J3DGDLoadPostTexMtxImm((MtxP)mMtx, param_0 * 3 + 0x40);
++    J3DGDWriteXFCmdHdr(0x5F8, 1);
++    J3DGDWrite_u32((u32)((param_0 * 3 + 0x40) << 8) | (u32)(mTexMtxInfo.mInfo & 0x3f));
++#else
+     GDOverflowCheck(0x35);
+     J3DGDLoadPostTexMtxImm((MtxP)mMtx, param_0 * 3 + 0x40);
++#endif
+ }
+ 
+ static void J3DGDLoadTexMtxImm(f32 (*param_1)[4], u32 param_2, GXTexMtxType param_3) {
+--- a/libs/JSystem/src/J3DGraphBase/J3DShapeMtx.cpp
++++ b/libs/JSystem/src/J3DGraphBase/J3DShapeMtx.cpp
+@@ -11,6 +11,11 @@
+ DUSK_GAME_DATA u16 J3DShapeMtx::sMtxLoadCache[10];
+ 
+ #ifdef TARGET_PC
++// dusk stereo (TEXGEN-SPLIT-ANSWER §1): aurora-exported texgen-class tag -- a 1-word XF
++// write riding the GX fifo adjacent to each matrix load, so the drain-time parser sees
++// exact load->class ordering. Classes: J3DTexMtxMode (ViewProjmap 3/9 = view-projected).
++extern "C" void duskTagTexMtxClass(u32 gxMtxId, u32 cls);
++
+ static void J3DFrameInterpConcat(MtxP lhs, MtxP rhs, Mtx out) {
+     if (!dusk::frame_interp::lookup_concat_replacement(lhs, rhs, out)) {
+         MTXConcat(lhs, rhs, out);
+@@ -204,6 +209,9 @@
+                 }
+                 }
+                 GXLoadTexMtxImm(*mtx, i * 3 + GX_PTTEXMTX0, GX_MTX3x4);
++#ifdef TARGET_PC
++                duskTagTexMtxClass((u32)(i * 3 + GX_PTTEXMTX0), sp_4c); // dusk stereo class tag
++#endif
+             }
+         }
+     } else {
+@@ -294,6 +302,9 @@
+                 }
+                 }
+                 GXLoadTexMtxImm(*mtx, i * 3 + GX_TEXMTX0, (GXTexMtxType)tex_mtx_info_1->mProjection);
++#ifdef TARGET_PC
++                duskTagTexMtxClass((u32)(i * 3 + GX_TEXMTX0), tex_gen_src); // dusk stereo class tag
++#endif
+             }
+         }
+     }

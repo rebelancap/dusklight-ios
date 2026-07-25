@@ -1,0 +1,71 @@
+Overlay patch 0036 (Phase 2 / stereo): export TP's camera distance for convergence.
+
+STEREO-3D-RECOVERY-FABLE §2/§4.1 + NEAR-DOUBLING-ANSWER-FABLE. The stereo
+convergence plane must track the camera->SUBJECT distance -- and the subject is
+Link, not the camera's look-at center. TP's field camera looks at the horizon
+(~1810 units), so eye->look-at puts the zero plane miles out and the entire near
+field (ground, flowers, butterflies) is crossed-biased -> unfixable near doubling
+(the near knee can't referee the whole ground plane vs the extreme-near tail).
+Anchoring on Link puts the subject on the panel; the far knee keeps the far look.
+
+record_camera (d_camera.cpp) already hands dusk the main camera each frame. We
+export BOTH distances: eye->center (gDusk3DCamDist, kept for logging/fallback) and
+eye->Link (gDusk3DCamDistLink, the one aurora converges on -- patch 0032). Link's
+position comes from daPy_getPlayerActorClass()/fopAcM_GetPosition_p (the canonical
+accessors; see d_a_formation_mng.h:191). The compute runs UN-gated by
+frame-interpolation (before the g_enabled early-out) so it is available whenever
+the camera updates.
+
+--- a/src/dusk/frame_interpolation.cpp
++++ b/src/dusk/frame_interpolation.cpp
+@@ -1,7 +1,9 @@
+ #include "dusk/frame_interpolation.h"
+ 
+ #include "f_op/f_op_camera_mng.h"
++#include "f_op/f_op_actor_mng.h"
+ #include "m_Do/m_Do_graphic.h"
++#include "d/actor/d_a_player.h"
+ #include "mtx.h"
+ 
+ #include <absl/container/flat_hash_map.h>
+@@ -279,8 +281,40 @@
+     MTXConcat(*resolved_lhs, *resolved_rhs, out);
+     return true;
+ }
++
++// visionOS stereo 3D: export the main camera's eye->look-at distance so aurora can
++// set the convergence plane (STEREO-3D-RECOVERY-FABLE §4.1). 0 => not yet known.
++extern "C" volatile float gDusk3DCamDist = 0.0f;
++// Subject-anchored convergence (NEAR-DOUBLING-ANSWER-FABLE): eye->Link distance. TP's field
++// camera looks at the HORIZON, so eye->look-at puts the zero plane miles out and the whole
++// near field (ground, flowers, butterflies) is crossed-biased -> unfixable near doubling.
++// The zero plane belongs on the subject (Link); aurora prefers this, falling back to a
++// capped look-at for player-less frames (cutscenes/menus). 0 => Link not known this frame.
++extern "C" volatile float gDusk3DCamDistLink = 0.0f; // = eye->getPlayer(0)->current.pos (candidate P0cur)
++// NEAR-DOUBLING readout probe (STEP-AND-SHADOWS-ANSWER §A): the P0cur candidate above came back
++// garbage, so log ALL FOUR candidates and pick the ONE correct camera-eye->Link expression by
++// data. p0 = getPlayer(0), pL = getLinkPlayer (LINK_PTR slot); current.pos (feet) vs eyePos (head).
++extern "C" volatile float gDusk3DLinkP0Eye = 0.0f;
++extern "C" volatile float gDusk3DLinkPLCur = 0.0f;
++extern "C" volatile float gDusk3DLinkPLEye = 0.0f;
+ 
+ void record_camera(::camera_process_class* cam, int camera_id) {
++    if (camera_id == 0 && cam != nullptr) {
++        const auto& e = cam->view.lookat.eye;
++        const auto& c = cam->view.lookat.center;
++        const float dx = e.x - c.x, dy = e.y - c.y, dz = e.z - c.z;
++        gDusk3DCamDist = std::sqrt(dx * dx + dy * dy + dz * dz);
++        auto distFrom = [&](const cXyz& q) {
++            const float lx = e.x - q.x, ly = e.y - q.y, lz = e.z - q.z;
++            return std::sqrt(lx * lx + ly * ly + lz * lz);
++        };
++        daPy_py_c* p0 = daPy_getPlayerActorClass();
++        daPy_py_c* pL = daPy_getLinkPlayerActorClass();
++        gDusk3DCamDistLink = (p0 != nullptr) ? distFrom(p0->current.pos) : 0.0f;
++        gDusk3DLinkP0Eye = (p0 != nullptr) ? distFrom(p0->eyePos) : 0.0f;
++        gDusk3DLinkPLCur = (pL != nullptr) ? distFrom(pL->current.pos) : 0.0f;
++        gDusk3DLinkPLEye = (pL != nullptr) ? distFrom(pL->eyePos) : 0.0f;
++    }
+     if (!g_enabled || camera_id != 0 || cam == nullptr) {
+         return;
+     }

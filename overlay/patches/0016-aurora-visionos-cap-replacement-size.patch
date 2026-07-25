@@ -1,0 +1,135 @@
+Overlay patch 0016: clamp UNCOMPRESSED visionOS replacement textures to 2048.
+
+Safety net for the one texture-pack hazard left after FABLE's analysis
+(4K-TEXTURES-ANALYSIS-FABLE.md): **uncompressed 32-bpp replacements**. The M5
+Vision Pro enables both TextureCompressionBC and TextureCompressionASTC, so the
+compressed packs (Henriko 4.0d Mobile = ASTC 4x4, Henriko 4.0d 4K = BC7, and the
+BC7 majority of TPDE+) upload compressed at ~8 bpp and are fine untouched. The
+danger is uncompressed BGRA8/RGBA8 textures: TPDE+ 1.2 ships **394 BGRA8 files**
+up to 8192x4096 = ~128 MB *decoded each*, and the opening cutscene creates enough
+at once to exhaust the heap:
+
+    aurora_end_frame -> resolve_sampled_textures -> find_replacement_for_key_locked
+      -> dawn APICreateTexture -> metal MakeDebugName -> std::bad_alloc -> abort
+
+Confirmed on device: TPDE+ (5456 registrations) aborts the same way the old
+uncompressed Mobile 3.0b (PNG -> RGBA8) pack did. Capping the LRU cache (patch
+0013) does NOT help -- the *simultaneous working set*, not cache growth, is the
+problem, and a single frame can't evict the textures it is drawing.
+
+Fix: box-filter downscale any replacement in an uncompressed 32-bpp format
+(RGBA8/BGRA8 + sRGB variants) whose long edge exceeds kVisionMaxReplacementDim
+(2048), in load_encoded_replacement. Per-texture memory drops sharply (a 8192x4096
+BGRA8 monster: 128 MB -> ~8 MB at 2048x1024) and the pack loads. Compressed
+formats (BC7/ASTC, blockSize != 4) pass through UNTOUCHED -- gate is format_info,
+not a single enum. This is a stopgap: the proper fix for TPDE+ is converting its
+394 BGRA8 files to ASTC 4x4 offline (astcenc), preserving full resolution; see
+FABLE §4.4. 2048 keeps them usable meanwhile (FABLE's working-set math clears it).
+
+Applied before mip handling, so embedded/sidecar mips are covered (mips dropped on
+clamped textures only; the compressed packs' full mip chains are never touched --
+that matters, it's the SoH "mipmap engine" win, FABLE §5). Cache accounting is
+automatically correct (bytes from the now-smaller handle).
+
+The box filter is byte-for-byte aurora's own gfx::downscale and was re-verified
+standalone under ASan/UBSan (4096->2048, odd dims, averaging, no-op, no OOB).
+
+visionOS-gated; every other platform untouched. Compressed + non-32-bpp formats
+fall through unchanged.
+
+--- a/extern/aurora/lib/gfx/texture_replacement.cpp
++++ b/extern/aurora/lib/gfx/texture_replacement.cpp
+@@ -649,6 +649,82 @@
+   std::string mip_name() const { return mipPath; }
+   std::optional<aurora::gfx::ConvertedTexture> load_mip() { return decode(); }
+ };
++
++#if defined(__APPLE__) && TARGET_OS_VISION
++// A 4K RGBA8 replacement is ~64MB (+mips); a pack full of them exhausts the
++// app heap on visionOS during a texture-heavy moment (the opening cutscene) ->
++// bad_alloc in Metal texture creation -> abort. 4K is also invisible overkill in
++// a ~1216pt floating window. Box-filter downscale RGBA8 replacements so the long
++// edge is <= kVisionMaxReplacementDim, bounding per-texture memory ~4x. The
++// filter matches gfx::downscale and was verified standalone (ASan/UBSan).
++constexpr uint32_t kVisionMaxReplacementDim = 2048;
++void clamp_replacement_to_cap(aurora::gfx::ConvertedTexture& tex, uint32_t cap) noexcept {
++  if (tex.width <= cap && tex.height <= cap) {
++    return; // already within budget
++  }
++  uint32_t w = tex.width;
++  uint32_t h = tex.height;
++  // Box-filter downscale works on any UNCOMPRESSED 32-bpp layout -- RGBA8 and
++  // BGRA8 and their sRGB variants all average per-byte identically. Gate on
++  // format_info, not a single enum: the Henriko pack decodes DDS to BGRA8Unorm,
++  // which the old RGBA8Unorm-only gate skipped -> textures stayed 4K -> still OOM.
++  const auto info = aurora::gfx::format_info(tex.format);
++  if (info.compressed || info.blockSize != 4) {
++    static bool loggedSkip = false;
++    if (!loggedSkip) {
++      loggedSkip = true;
++      Log.warn("texture_replacement: visionOS cannot downscale oversized {}x{} replacement "
++               "(format {}, compressed {}, blockSize {}); memory risk remains",
++               w, h, static_cast<uint32_t>(tex.format), info.compressed, info.blockSize);
++    }
++    return;
++  }
++  if (w == 0 || h == 0 || tex.data.size() < static_cast<size_t>(w) * h * 4) {
++    return; // malformed; do not touch
++  }
++  const uint32_t origW = w;
++  const uint32_t origH = h;
++  // Halve with a 2x2 box filter until both dimensions fit. Reading only mip 0
++  // (the first w*h*4 bytes) drops any mip chain; we set mips=1 below.
++  while (w > cap || h > cap) {
++    const uint32_t nw = std::max(1u, w / 2);
++    const uint32_t nh = std::max(1u, h / 2);
++    aurora::ByteBuffer dst{static_cast<size_t>(nw) * nh * 4};
++    const uint8_t* srcPixels = tex.data.data();
++    uint8_t* dstPixels = dst.data();
++    for (uint32_t y = 0; y < nh; ++y) {
++      const uint32_t y0 = std::min(y * 2, h - 1);
++      const uint32_t y1 = std::min(y * 2 + 1, h - 1);
++      for (uint32_t x = 0; x < nw; ++x) {
++        const uint32_t x0 = std::min(x * 2, w - 1);
++        const uint32_t x1 = std::min(x * 2 + 1, w - 1);
++        const uint8_t* p00 = srcPixels + (static_cast<size_t>(y0) * w + x0) * 4;
++        const uint8_t* p01 = srcPixels + (static_cast<size_t>(y0) * w + x1) * 4;
++        const uint8_t* p10 = srcPixels + (static_cast<size_t>(y1) * w + x0) * 4;
++        const uint8_t* p11 = srcPixels + (static_cast<size_t>(y1) * w + x1) * 4;
++        uint8_t* o = dstPixels + (static_cast<size_t>(y) * nw + x) * 4;
++        for (int c = 0; c < 4; ++c) {
++          o[c] = static_cast<uint8_t>(
++              (static_cast<uint32_t>(p00[c]) + p01[c] + p10[c] + p11[c] + 2) / 4);
++        }
++      }
++    }
++    tex.data = std::move(dst);
++    w = nw;
++    h = nh;
++  }
++  tex.width = w;
++  tex.height = h;
++  tex.mips = 1;
++  static bool loggedOnce = false;
++  if (!loggedOnce) {
++    loggedOnce = true;
++    Log.info("texture_replacement: visionOS downscaling oversized replacements "
++             "(e.g. format {} {}x{} -> {}x{}) to bound memory",
++             static_cast<uint32_t>(tex.format), origW, origH, w, h);
++  }
++}
++#endif
+ 
+ template <typename Source>
+ std::optional<aurora::gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noexcept {
+@@ -666,6 +742,10 @@
+     return std::nullopt;
+   }
+ 
++#if defined(__APPLE__) && TARGET_OS_VISION
++  clamp_replacement_to_cap(*base, kVisionMaxReplacementDim);
++#endif
++
+   if (base->mips > 1) {
+     return base;
+   }

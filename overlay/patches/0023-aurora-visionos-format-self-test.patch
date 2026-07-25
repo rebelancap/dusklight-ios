@@ -1,0 +1,58 @@
+Overlay patch 0023: boot-time compressed-texture-format self-test (visionOS).
+
+FABLE's recommendation after the BC7 crash (D-017): the BC7 abort was invisible
+until a cutscene created the first BC7 texture. A create-and-destroy of a 4x4
+texture of each *advertised* compressed format at gfx init turns any future
+format-mapping regression into a single boot-log line (or, if a mapping is broken,
+a boot-time abort with a clear preceding log line naming the format) instead of a
+mid-game crash hunt.
+
+Placed just before `g_initialized = true` in webgpu init, where `g_device` exists
+and `g_bcTexturesSupported`/`g_astcTexturesSupported` are set. Logs one line per
+supported class. visionOS-gated (this is where the guards bite; keeps the diff
+scoped). No label on the descriptors -- nothing to trip.
+
+--- a/extern/aurora/lib/webgpu/gpu.cpp
++++ b/extern/aurora/lib/webgpu/gpu.cpp
+@@ -1052,6 +1052,41 @@
+   create_resample_pipeline();
+   gpu_prof::initialize();
+   resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
++#if defined(__APPLE__) && TARGET_OS_VISION
++  // Boot-time canary: create+destroy a 4x4 of each advertised compressed format.
++  // A broken format->MTLPixelFormat mapping (see the BC7 crash, patch 0021) then
++  // aborts HERE with the format named just above, not mid-cutscene.
++  {
++    struct FmtProbe { const char* name; wgpu::TextureFormat format; bool supported; };
++    const FmtProbe probes[] = {
++        {"BC1", wgpu::TextureFormat::BC1RGBAUnorm, g_bcTexturesSupported},
++        {"BC3", wgpu::TextureFormat::BC3RGBAUnorm, g_bcTexturesSupported},
++        {"BC7", wgpu::TextureFormat::BC7RGBAUnorm, g_bcTexturesSupported},
++        {"ASTC4x4", wgpu::TextureFormat::ASTC4x4Unorm, g_astcTexturesSupported},
++    };
++    for (const auto& p : probes) {
++      if (!p.supported) {
++        continue;
++      }
++      Log.info("format self-test: probing 4x4 {} ...", p.name);
++      const wgpu::TextureDescriptor desc{
++          .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
++          .dimension = wgpu::TextureDimension::e2D,
++          .size = {4, 4, 1},
++          .format = p.format,
++          .mipLevelCount = 1,
++          .sampleCount = 1,
++      };
++      auto probe = g_device.CreateTexture(&desc);
++      if (probe) {
++        probe.Destroy();
++        Log.info("format self-test: {} OK", p.name);
++      } else {
++        Log.error("format self-test: {} FAILED to create", p.name);
++      }
++    }
++  }
++#endif
+   g_initialized = true;
+   return true;
+ }

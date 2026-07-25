@@ -1,0 +1,36 @@
+Overlay patch 0024: expose the OS thermal state (visionOS) for the live overlay.
+
+A live perf/thermal readout on the headset to judge whether there's
+optimization headroom. NSProcessInfo.thermalState is the OS signal (nominal ->
+fair -> serious -> critical). device_ios.mm already imports Foundation and is the
+aurora Obj-C TU compiled for visionOS (device + sim), so add a small C accessor
+here; the overlay (patch 0025, dusk) declares and calls it.
+
+Returns a static string; safe to call every frame.
+
+--- a/extern/aurora/lib/device_ios.mm
++++ b/extern/aurora/lib/device_ios.mm
+@@ -6,6 +6,23 @@
+ #include <algorithm>
+ #include <atomic>
+ 
++// Live thermal readout for the perf overlay (patch 0024). NSProcessInfo is the
++// OS signal for throttling; the overlay shows it so you can see headroom.
++extern "C" const char* aurora_get_thermal_state() {
++  switch ([[NSProcessInfo processInfo] thermalState]) {
++  case NSProcessInfoThermalStateNominal:
++    return "nominal";
++  case NSProcessInfoThermalStateFair:
++    return "fair";
++  case NSProcessInfoThermalStateSerious:
++    return "serious";
++  case NSProcessInfoThermalStateCritical:
++    return "critical";
++  default:
++    return "unknown";
++  }
++}
++
+ @interface AuroraDeviceHaptics : NSObject
+ {
+   std::atomic<uint64_t> _generation;

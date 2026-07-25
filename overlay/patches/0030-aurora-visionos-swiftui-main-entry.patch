@@ -1,0 +1,59 @@
+Overlay patch 0030 (Phase 2 / M1): let SwiftUI own main() on visionOS.
+
+STEREO-3D-GUIDE §5.2 + §5.5. Today the process entry on Apple platforms is
+aurora/lib/main.cpp:
+
+    #include <aurora/main.h>   // declares aurora_main + `#define main aurora_main`
+    #undef main
+    #include <SDL3/SDL_main.h> // renames THIS main -> SDL_main; SDL provides the
+                               // real iOS/xrOS main() = UIApplicationMain bootstrap
+    int main(int argc, char** argv) { return aurora_main(argc, argv); }
+
+So on visionOS the game boots under SDL's UIApplicationMain / SDLUIKitSceneDelegate
+(the `postFinishLaunch` frame in our backtraces), which then calls aurora_main ->
+dusk's main (dusk/main.cpp:223, itself `aurora_main` via the header's
+`#define main aurora_main`) -> game_main (m_Do_main.cpp:483).
+
+Phase 2 needs an `ImmersiveSpace`, and that can ONLY be declared from a SwiftUI
+`App` that owns the process entry point. Two `main()`s cannot coexist, and if
+SDL's UIApplicationMain wins, the game boots under SDL's scene delegate with no
+SwiftUI App for `openImmersiveSpace` to attach to. So on visionOS we do NOT pull
+in SDL_main.h here; instead we expose a plain C entry `dusk_engine_main` that the
+Swift host controller (app/visionos/DuskHostViewController) calls -- after
+`SDL_SetMainReady()` -- once the SwiftUI scene is live (guide §5.2, the two GCD
+laws in §5.3 govern HOW it is called: a runloop-timer, never dispatch_async).
+
+Gate is **structural** (`TARGET_OS_VISION`), NOT an optional `-D` flag: the guide
+(§10) warns the 3D shell must never hinge on a define someone can forget and
+silently ship a main-less / SDL-boot binary. Every visionOS build takes this
+path; iOS/tvOS/macOS/Windows/Linux/Android are untouched (still SDL_main). The
+DUSK_SWIFT_MAIN define is still set by CMake (patch 0031) for the Swift/ObjC shell
+TUs that want to know they own main, but the engine-entry switch here keys off the
+platform so it cannot regress.
+
+Match-asserted; touches only aurora/lib/main.cpp. Paired with the CMake + shell
+integration in the M1 patch series (0031: CMake Swift target + SDL_main drop;
+new shell files under app/visionos/, no patch needed -- they are our tree).
+
+--- a/extern/aurora/lib/main.cpp
++++ b/extern/aurora/lib/main.cpp
+@@ -1,6 +1,19 @@
+ #include <aurora/main.h>
+ #undef main
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && TARGET_OS_VISION
++// visionOS: SwiftUI's @main App owns the process entry point (required to
++// declare an ImmersiveSpace for Phase 2). Do NOT include SDL_main.h here -- on
++// iOS/xrOS it would install SDL's UIApplicationMain bootstrap as the real main(),
++// which cannot coexist with the SwiftUI @main. Instead expose a plain C entry the
++// Swift host controller calls (after SDL_SetMainReady()) once the scene is live.
++extern "C" int dusk_engine_main(int argc, char** argv) { return aurora_main(argc, argv); }
++#else
+ #include <SDL3/SDL_main.h>
+ 
+ int main(int argc, char** argv) { return aurora_main(argc, argv); }
++#endif

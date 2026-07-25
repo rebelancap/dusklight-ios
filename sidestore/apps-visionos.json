@@ -1,0 +1,35 @@
+{
+  "name": "Dusklight \u2014 Apple Vision Pro",
+  "identifier": "com.rebelancap.dusklight.visionos",
+  "subtitle": "Twilight Princess in 2D and stereoscopic 3D",
+  "description": "The Legend of Zelda: Twilight Princess on Apple Vision Pro \u2014 a free-floating 2D window and a world-locked stereoscopic 3D mode. Bring your own GameCube disc.",
+  "website": "https://github.com/rebelancap/dusklight-ios",
+  "tintColor": "#C9A227",
+  "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/source-icon.png",
+  "apps": [
+    {
+      "name": "Dusklight",
+      "bundleIdentifier": "com.rebelancap.dusklight",
+      "developerName": "rebelancap",
+      "subtitle": "The Legend of Zelda: Twilight Princess for Apple Vision Pro",
+      "localizedDescription": "The Legend of Zelda: Twilight Princess on Apple Vision Pro: the full GameCube game rendered natively on Metal, in a free-floating 2D window and a world-locked stereoscopic 3D mode with foveated rendering, spatial audio anchored to the screen, and live-tunable screen size, distance, and depth. Ships with no game content; you supply your own GameCube Twilight Princess disc image.",
+      "iconURL": "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/assets/dusklight.png",
+      "tintColor": "#C9A227",
+      "category": "games",
+      "screenshotURLs": [
+        "https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/docs/screenshots/visionos-2d-title.jpg"
+      ],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "date": "2026-07-25T06:05:44Z",
+          "localizedDescription": "**Dusklight for Apple Vision Pro** \u2014 The Legend of Zelda: Twilight Princess, rendered natively on **Metal** (no emulator, no translation layer), including a world-locked **stereoscopic 3D mode**.\n\nShips with **no game content** \u2014 you supply your own **GameCube Twilight Princess disc image** (US `GZ2E01` or European/PAL `GZ2P01`, as `.iso` or `.rvz`). Drop it in via Files at first launch; it's read in place and never leaves your device.\n\n### Install via SideStore source (recommended \u2014 auto-updates)\nAdd one URL to [SideStore](https://sidestore.io) and it installs *and updates itself* when new versions ship:\n\n- **Apple Vision Pro:** `https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/apps-visionos.json`\n\nFirst install SideStore onto the headset with my [iloader fork](https://github.com/rebelancap/iloader/releases#release-visionos) (runs on an Apple Silicon Mac, pairs over Wi-Fi \u2014 no cable, no Dev Strap), then add the source.\n\n### Or download and sideload manually\n- **`dusklight-1.0.0-visionOS.ipa`** \u2014 Apple Vision Pro (visionOS 2+), 2D + 3D in one app\n\n### What's in it\n- The **full Twilight Princess**, rendered natively on Metal (GX \u2192 aurora \u2192 Dawn/WebGPU \u2192 Metal), with GameCube memory-card saves\n- **Runtime disc loading** \u2014 the disc image is read in place; no PC tools, no extraction\n- **Game controllers**, and **60 / 90 / 120 Hz** (auto-detects your headset's panel)\n- A **free-resizing 2D window** at high resolution\n- **Stereoscopic 3D mode** \u2014 the game on a world-locked panel floating in your room, with **foveated rendering** (as crisp as the flat 2D window, sharpest where you look), **spatial audio anchored to the screen**, and live-tunable **stereo depth**, **screen size / distance / height** (any aspect renders true widescreen FOV, no stretching), **surroundings dimming**, and Digital Crown **recenter**\n- **Dolphin-format HD/4K texture packs** via drag-and-drop in Files\n\nFull instructions in the [README](https://github.com/rebelancap/dusklight-ios#readme).\n\nTHE LEGEND OF ZELDA: TWILIGHT PRINCESS \u00a9 Nintendo. This project is not affiliated with or endorsed by Nintendo and ships no Nintendo content; you supply your own disc.",
+          "downloadURL": "https://github.com/rebelancap/dusklight-ios/releases/download/v1.0.0/dusklight-1.0.0-visionOS.ipa",
+          "size": 22194107,
+          "minOSVersion": "2.0"
+        }
+      ]
+    }
+  ],
+  "news": []
+}

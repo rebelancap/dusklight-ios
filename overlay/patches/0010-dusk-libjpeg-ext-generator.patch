@@ -1,0 +1,67 @@
+Overlay patch 0010: don't let libjpeg-turbo's ExternalProject inherit Xcode.
+
+Second (and last) blocker to archiving/signing for OTA. With -GXcode the
+libjpeg-turbo ExternalProject inherits the Xcode generator, and the archive dies:
+
+    CMake Error at cmake_install.cmake:99 (file):
+      file INSTALL cannot find
+      ".../libjpeg-turbo-ext-build/RelWithDebInfo/tjbench-static":
+      No such file or directory.
+
+Cause: Xcode appends EFFECTIVE_PLATFORM_NAME to its config dir, so the sub-build
+writes `RelWithDebInfo-xros/`, while libjpeg-turbo's own install step looks in
+plain `RelWithDebInfo/`. (Note the missing file is `tjbench` -- a *benchmark*
+tool we never use; it fails purely on the path mismatch.)
+
+Fix: pin the sub-build to a single-config generator, which has no such suffix.
+libjpeg-turbo is a leaf dependency built for its static lib -- nothing about it
+needs to be in the Xcode project.
+
+CMAKE_MAKE_PROGRAM must be overridden too, and this is the subtle part. It is in
+`_jpeg_passthrough_vars`. I first assumed it was unset under Xcode because it is
+absent from CMakeCache.txt -- **wrong**: the Xcode generator sets it as a *normal*
+variable (`/usr/bin/xcodebuild`), and `if (DEFINED ...)` sees normal variables
+too. So it got passed to the Ninja sub-build, which then probed it and died:
+
+    CMake Error at CMakeLists.txt:7 (project):
+      Running '/usr/bin/xcodebuild' '--version' failed with:
+      xcodebuild: error: invalid option '--version'
+
+Hence the explicit `-DCMAKE_MAKE_PROGRAM=<ninja>` appended *after* the passthrough
+loop, where last-wins on the command line.
+
+Generator-guarded, so Ninja/Makefiles builds -- including our own device build
+that the measurements came from -- are byte-for-byte unchanged. Falls back
+silently if ninja is absent, leaving the previous (broken-under-Xcode-only)
+behavior rather than failing a build that would otherwise work.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -148,7 +148,27 @@
+                 list(APPEND _jpeg_cmake_args -D${_var}=${${_var}})
+             endif ()
+         endforeach ()
++        # The Xcode generator suffixes its config dir with
++        # EFFECTIVE_PLATFORM_NAME (RelWithDebInfo-xros), but libjpeg-turbo's
++        # install step looks in plain RelWithDebInfo/ -- so an inherited Xcode
++        # generator breaks `xcodebuild archive` on a missing tjbench-static.
++        # Pin the sub-build to a single-config generator; it is a leaf
++        # dependency and has no reason to live in the Xcode project.
++        set(_jpeg_ext_generator)
++        if (CMAKE_GENERATOR STREQUAL "Xcode")
++            find_program(_jpeg_ninja ninja)
++            if (_jpeg_ninja)
++                set(_jpeg_ext_generator CMAKE_GENERATOR "Ninja")
++                # The Xcode generator defines CMAKE_MAKE_PROGRAM as a *normal*
++                # variable (/usr/bin/xcodebuild), so the passthrough loop above
++                # forwards it and the Ninja sub-build then probes it with
++                # `xcodebuild --version` and dies. Appending here wins: last -D
++                # on the command line takes precedence.
++                list(APPEND _jpeg_cmake_args -DCMAKE_MAKE_PROGRAM=${_jpeg_ninja})
++            endif ()
++        endif ()
+         ExternalProject_Add(libjpeg-turbo-ext
++            ${_jpeg_ext_generator}
+             URL https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.1.0.tar.gz
+             URL_HASH SHA256=35fec2e1ddfb05ecf6d93e50bc57c1e54bc81c16d611ddf6eff73fff266d8285
+             CMAKE_ARGS ${_jpeg_cmake_args}
