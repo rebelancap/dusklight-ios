@@ -3,7 +3,7 @@ name: Build SideStore source
 on:
   # Regenerate on a schedule so a new release is picked up automatically.
   schedule:
-    - cron: "17 */3 * * *"      # every 3 hours
+    - cron: "17 * * * *"        # hourly (unchanged runs are ~free API calls; cuts worst-case update lag 3h -> 1h)
   # Manual run button in the Actions tab.
   workflow_dispatch:
   # An immediate rebuild right after a release is published.
