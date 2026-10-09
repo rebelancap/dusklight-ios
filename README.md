@@ -20,9 +20,12 @@ Google's **Dawn** (WebGPU) onto Metal.
 **Add the SideStore source** — the easiest path, and the app auto-updates when new
 versions ship:
 
-| Device | Source URL |
-| --- | --- |
-| Apple Vision Pro | `https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/apps-visionos.json` |
+| Device | Source | Source URL |
+| --- | --- | --- |
+| Apple Vision Pro | Dusklight only | `https://raw.githubusercontent.com/rebelancap/dusklight-ios/main/sidestore/apps-visionos.json` |
+| Apple Vision Pro | All ports | `https://raw.githubusercontent.com/rebelancap/all-ports/main/apps-visionos.json` |
+
+Dusklight is in both sources — add either one (All ports carries every rebelancap port).
 
 On **Apple Vision Pro**, first install SideStore onto the headset with my
 [iloader fork](https://github.com/rebelancap/iloader/releases#release-visionos)
