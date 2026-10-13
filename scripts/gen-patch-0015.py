@@ -16,6 +16,10 @@ desktop user's Documents).
 
 TargetConditionals.h is already included in m_Do_main.cpp (line ~100); no new
 include needed. One-line, visionOS-gated.
+
+2026-10 sync: upstream renamed InitializeFileLogging(dir, level) to
+InitializeLogging(dir, standardOptions) (borealis::log backend, still writes
+<dir>/logs/). Same one-line swap of the directory argument.
 """
 import subprocess, pathlib, tempfile
 
@@ -26,16 +30,16 @@ SRC = ROOT / "vendor/dusklight" / REL
 orig = SRC.read_text()
 
 old = ('    dusk::CachePath = dataPaths.cachePath;\n'
-       '    dusk::InitializeFileLogging(dusk::CachePath, startupLogLevel);\n')
+       '    dusk::InitializeLogging(dusk::CachePath, standardOptions);\n')
 new = ('    dusk::CachePath = dataPaths.cachePath;\n'
        '#if defined(__APPLE__) && TARGET_OS_VISION\n'
        '    // Library/Application Support is not reachable from the Files app on\n'
        '    // visionOS, so a device crash would leave no grabbable log. Log into the\n'
        '    // data path (Documents, Files-visible via patch 0004) so it can be pulled\n'
        '    // for remote diagnosis (charter rule 5).\n'
-       '    dusk::InitializeFileLogging(dusk::ConfigPath, startupLogLevel);\n'
+       '    dusk::InitializeLogging(dusk::ConfigPath, standardOptions);\n'
        '#else\n'
-       '    dusk::InitializeFileLogging(dusk::CachePath, startupLogLevel);\n'
+       '    dusk::InitializeLogging(dusk::CachePath, standardOptions);\n'
        '#endif\n')
 
 n = orig.count(old)

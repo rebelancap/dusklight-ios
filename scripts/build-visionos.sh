@@ -42,6 +42,7 @@ cmake --no-warn-unused-cli -S "$VENDOR" -B "$BUILD" -GNinja \
     -DAURORA_DAWN_LINKAGE=static \
     -DDAWN_BUILD_PROTOBUF=OFF \
     -DTINT_BUILD_IR_BINARY=OFF \
+    -DDUSK_ENABLE_CODE_MODS=OFF \
     -DDUSK_VISIONOS_RESOURCE_DIR="$ROOT/app/visionos" \
     "$@"
 

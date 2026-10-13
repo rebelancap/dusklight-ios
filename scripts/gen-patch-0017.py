@@ -13,6 +13,15 @@ next tuning decision (is 2048/512MB right, or do we need 1024/256MB?) into a
 measurement instead of a guess.
 
 visionOS-gated, diagnostic-only. Every other platform is untouched.
+
+2026-10 sync: aurora rewrote replacement loading (async full loads behind
+thumbnails; one cache_replacement_locked() for every tier; every Dawn texture
+for a decoded replacement now made in create_converted_texture_handle()). So:
+the helpers sit before create_converted_texture_handle (their first user), the
+first-creation log moved to the top of create_converted_texture_handle (still
+strictly BEFORE the first CreateTexture, now on every path incl. async), and the
+"N created" log moved to the end of cache_replacement_locked (counts cached
+textures, thumbnails included).
 """
 import subprocess, pathlib, tempfile
 
@@ -42,8 +51,7 @@ assert text.count(inc_old) == 1, f"include anchor: {text.count(inc_old)}"
 text = text.replace(inc_old, inc_new)
 
 # --- hunk 2: footprint helper, before find_replacement_for_key_locked --------
-helper_anchor = ('std::optional<aurora::gfx::TextureHandle>\n'
-                 'find_replacement_for_key_locked(const aurora::texture::ReplacementKey& key) noexcept {\n')
+helper_anchor = ('gfx::TextureHandle create_converted_texture_handle(const EntryLoadSnapshot& entry,\n')
 helper = (
     '#if defined(__APPLE__) && TARGET_OS_VISION\n'
     'uint64_t current_phys_footprint_mib() noexcept {\n'
@@ -66,23 +74,24 @@ text = text.replace(helper_anchor, helper + helper_anchor)
 
 # --- hunk 2b: pre-create first-miss log (fires BEFORE the first CreateTexture, so
 #             it survives a crash on the very first creation) ------------------
-pre_anchor = '  auto handle = load_entry_handle(key, *entry);\n'
-pre_new = ('#if defined(__APPLE__) && TARGET_OS_VISION\n'
+pre_anchor = ('gfx::TextureHandle create_converted_texture_handle(const EntryLoadSnapshot& entry,\n'
+              '                                                   const gfx::ConvertedTexture& replacement) noexcept {\n')
+pre_new = (pre_anchor +
+           '#if defined(__APPLE__) && TARGET_OS_VISION\n'
            '  static bool s_loggedFirstCreate = false;\n'
            '  if (!s_loggedFirstCreate) {\n'
            '    s_loggedFirstCreate = true;\n'
            '    Log.info("texture_replacement: first replacement creation starting; available {} MiB, footprint {} MiB",\n'
            '             available_memory_mib(), current_phys_footprint_mib());\n'
            '  }\n'
-           '#endif\n'
-           '  auto handle = load_entry_handle(key, *entry);\n')
+           '#endif\n')
 assert text.count(pre_anchor) == 1, f"pre-create anchor: {text.count(pre_anchor)}"
 text = text.replace(pre_anchor, pre_new)
 
 # --- hunk 3: the log call, after the new texture is cached + evicted ----------
 log_anchor = ('  s_replacementCacheBytes += replacementBytes;\n'
               '  evict_replacement_cache_if_needed();\n'
-              '  return handle;\n')
+              '}\n')
 log_new = ('  s_replacementCacheBytes += replacementBytes;\n'
            '  evict_replacement_cache_if_needed();\n'
            '#if defined(__APPLE__) && TARGET_OS_VISION\n'
@@ -94,7 +103,7 @@ log_new = ('  s_replacementCacheBytes += replacementBytes;\n'
            '             available_memory_mib());\n'
            '  }\n'
            '#endif\n'
-           '  return handle;\n')
+           '}\n')
 assert text.count(log_anchor) == 1, f"log anchor: {text.count(log_anchor)}"
 text = text.replace(log_anchor, log_new)
 

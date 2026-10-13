@@ -19,7 +19,7 @@ byte-for-byte what it was. Same pattern as DUSK_VISIONOS_RESOURCE_DIR in patch
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -320,7 +320,11 @@
+@@ -270,7 +270,11 @@
  # TODO: version handling for res includes
  
  set(DUSK_BUNDLE_NAME Dusklight)

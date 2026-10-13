@@ -17,9 +17,12 @@ Pairs with 0018. Two things:
 
 <string_view> and TARGET_OS_VISION are already included in this file.
 
+2026-10 sync: re-anchored on webgpu::g_device (namespace move). Upstream still
+passes label.c_str(), so the length fix is still needed.
+
 --- a/extern/aurora/lib/gfx/texture_replacement.cpp
 +++ b/extern/aurora/lib/gfx/texture_replacement.cpp
-@@ -843,7 +843,7 @@
+@@ -1090,7 +1090,7 @@
        .depthOrArrayLayers = 1,
    };
    const wgpu::TextureDescriptor textureDescriptor{
@@ -28,7 +31,7 @@ Pairs with 0018. Two things:
        .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
        .dimension = wgpu::TextureDimension::e2D,
        .size = size,
-@@ -851,10 +851,19 @@
+@@ -1098,10 +1098,19 @@
        .mipLevelCount = replacement.mips,
        .sampleCount = 1,
    };
@@ -41,7 +44,7 @@ Pairs with 0018. Two things:
 +             static_cast<uint32_t>(replacement.format), label, label.size());
 +  }
 +#endif
-   auto texture = g_device.CreateTexture(&textureDescriptor);
+   auto texture = webgpu::g_device.CreateTexture(&textureDescriptor);
    const auto viewLabel = fmt::format("{} view", label);
    const wgpu::TextureViewDescriptor textureViewDescriptor{
 -      .label = viewLabel.c_str(),

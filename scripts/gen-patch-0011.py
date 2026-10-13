@@ -25,6 +25,9 @@ the true-gpu_ms instrumentation the charter wants exists.)
 Both are plain config defaults the user can change in Settings; nothing here
 forces behavior. visionOS-gated via TARGET_OS_VISION, so every other platform's
 defaults are byte-for-byte unchanged.
+
+2026-10 sync: include anchor moved (upstream reordered the include block); the
+two default edits are unchanged.
 """
 import subprocess, pathlib, tempfile
 
@@ -38,13 +41,11 @@ text = orig
 EDITS = [
     # Add the TargetConditionals include (guarded) after the existing includes.
     (
-        '#include "dusk/settings.h"\n'
-        '#include "dusk/config.hpp"\n'
-        '#include <aurora/aurora.h>\n',
-
-        '#include "dusk/settings.h"\n'
-        '#include "dusk/config.hpp"\n'
         '#include <aurora/aurora.h>\n'
+        '#include <dolphin/vi.h>\n',
+
+        '#include <aurora/aurora.h>\n'
+        '#include <dolphin/vi.h>\n'
         '\n'
         '#ifdef __APPLE__\n'
         '#include <TargetConditionals.h>\n'

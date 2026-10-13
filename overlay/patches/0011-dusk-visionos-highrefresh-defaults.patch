@@ -25,11 +25,14 @@ Both are plain config defaults the user can change in Settings; nothing here
 forces behavior. visionOS-gated via TARGET_OS_VISION, so every other platform's
 defaults are byte-for-byte unchanged.
 
+2026-10 sync: include anchor moved (upstream reordered the include block); the
+two default edits are unchanged.
+
 --- a/src/dusk/settings.cpp
 +++ b/src/dusk/settings.cpp
-@@ -2,6 +2,19 @@
- #include "dusk/config.hpp"
+@@ -8,6 +8,19 @@
  #include <aurora/aurora.h>
+ #include <dolphin/vi.h>
  
 +#ifdef __APPLE__
 +#include <TargetConditionals.h>
@@ -47,7 +50,7 @@ defaults are byte-for-byte unchanged.
  namespace dusk {
  
  UserSettings g_userSettings = {
-@@ -9,7 +22,7 @@
+@@ -15,7 +28,7 @@
          .enableFullscreen {"video.enableFullscreen", false},
          .enableVsync {"video.enableVsync", true},
          .lockAspectRatio {"video.lockAspectRatio", false},
@@ -56,7 +59,7 @@ defaults are byte-for-byte unchanged.
          .fpsOverlayCorner {"game.fpsOverlayCorner", 0},
          .maxFrameRate {"video.maxFrameRate", 240},
          .rememberWindowSize {"video.rememberWindowSize", false},
-@@ -69,7 +82,7 @@
+@@ -80,7 +93,7 @@
          .depthOfFieldMode{"game.depthOfFieldMode", DepthOfFieldMode::Dusk},
          .disableWaterRefraction {"game.disableWaterRefraction", false},
          .enableTextureReplacements {"game.enableTextureReplacements", true},

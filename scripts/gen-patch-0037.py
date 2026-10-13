@@ -20,6 +20,9 @@ which have the mode in scope as sp_4c / tex_gen_src).
 
 Direct-GX draws (e.g. dDlst_shadowControl_c drop shadows) never tag -> class 0 ->
 glued, which is the correct fail-safe default (TEXGEN-SPLIT-ANSWER "class policy").
+
+2026-10 sync: upstream moved TARGET_PC guards from #ifdef to #if (and
+dusk::frame_interp to dusk::interp); the inserted guards follow suit. Same hooks.
 """
 import subprocess, pathlib, tempfile
 
@@ -41,7 +44,7 @@ EDITS = {
          '    J3DGDLoadPostTexMtxImm((MtxP)mMtx, param_0 * 3 + 0x40);\n'
          '}\n',
          'void J3DTexMtx::loadTexMtx(u32 param_0) const {\n'
-         '#ifdef TARGET_PC\n'
+         '#if TARGET_PC\n'
          '    // dusk stereo (TEXGEN-SPLIT-ANSWER \xa71): tag the load with its J3DTexMtxMode so aurora\n'
          '    // can split view-projected chains (water shine -- takes the stereo "Texture depth"\n'
          '    // shift) from world-projected ones (terrain overlay, cloud shadows -- stay glued to\n'
@@ -58,7 +61,7 @@ EDITS = {
          '}\n'
          '\n'
          'void J3DTexMtx::loadPostTexMtx(u32 param_0) const {\n'
-         '#ifdef TARGET_PC\n'
+         '#if TARGET_PC\n'
          '    // dusk stereo (TEXGEN-SPLIT-ANSWER \xa71): class tag rides adjacent -- see loadTexMtx.\n'
          '    GDOverflowCheck(0x35 + 9);\n'
          '    J3DGDLoadPostTexMtxImm((MtxP)mMtx, param_0 * 3 + 0x40);\n'
@@ -72,9 +75,9 @@ EDITS = {
     ],
     "libs/JSystem/src/J3DGraphBase/J3DShapeMtx.cpp": [
         # the aurora-exported tag helper, declared in the file's existing TARGET_PC block
-        ('#ifdef TARGET_PC\n'
+        ('#if TARGET_PC\n'
          'static void J3DFrameInterpConcat(MtxP lhs, MtxP rhs, Mtx out) {\n',
-         '#ifdef TARGET_PC\n'
+         '#if TARGET_PC\n'
          '// dusk stereo (TEXGEN-SPLIT-ANSWER \xa71): aurora-exported texgen-class tag -- a 1-word XF\n'
          '// write riding the GX fifo adjacent to each matrix load, so the drain-time parser sees\n'
          '// exact load->class ordering. Classes: J3DTexMtxMode (ViewProjmap 3/9 = view-projected).\n'
@@ -84,13 +87,13 @@ EDITS = {
         # differed path, PT branch (mode in scope as sp_4c)
         ('                GXLoadTexMtxImm(*mtx, i * 3 + GX_PTTEXMTX0, GX_MTX3x4);\n',
          '                GXLoadTexMtxImm(*mtx, i * 3 + GX_PTTEXMTX0, GX_MTX3x4);\n'
-         '#ifdef TARGET_PC\n'
+         '#if TARGET_PC\n'
          '                duskTagTexMtxClass((u32)(i * 3 + GX_PTTEXMTX0), sp_4c); // dusk stereo class tag\n'
          '#endif\n'),
         # differed path, TEXMTX branch (mode in scope as tex_gen_src)
         ('                GXLoadTexMtxImm(*mtx, i * 3 + GX_TEXMTX0, (GXTexMtxType)tex_mtx_info_1->mProjection);\n',
          '                GXLoadTexMtxImm(*mtx, i * 3 + GX_TEXMTX0, (GXTexMtxType)tex_mtx_info_1->mProjection);\n'
-         '#ifdef TARGET_PC\n'
+         '#if TARGET_PC\n'
          '                duskTagTexMtxClass((u32)(i * 3 + GX_TEXMTX0), tex_gen_src); // dusk stereo class tag\n'
          '#endif\n'),
     ],

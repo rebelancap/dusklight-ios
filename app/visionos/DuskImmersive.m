@@ -130,6 +130,7 @@ static id<MTLTexture> dusk3d_eyeCopy[2];
 // (cached by IOSurface identity so we only wrap on change).
 static IOSurfaceRef dusk3d_eyeSrcSurface[2];
 static id<MTLTexture> dusk3d_eyeSrcTex[2];
+static bool dusk3d_eyeFenceLogged[2];
 
 // Test pattern shown until the engine's eye framebuffers exist (M2 gate: the
 // compositor path is verifiable in the sim before any aurora work lands).
@@ -285,6 +286,7 @@ void Dusk3D_Immersive_Run(cp_layer_renderer_t layer_renderer) {
     dusk3d_frameCount = 0;
     dusk3d_haveScreenAnchor = false; // re-center each time 3D is entered
     dusk3d_eyeCopy[0] = dusk3d_eyeCopy[1] = nil;
+    dusk3d_eyeFenceLogged[0] = dusk3d_eyeFenceLogged[1] = false;
     dusk3d_fidelityLogged = false;
 
     ar_world_tracking_configuration_t wtc = ar_world_tracking_configuration_create();
@@ -377,12 +379,33 @@ void Dusk3D_Immersive_Run(cp_layer_renderer_t layer_renderer) {
                 IOSurfaceRef ios = (IOSurfaceRef)Dusk3D_GetEyeIOSurface(e + 1);
                 if (!ios || gDusk3DEyeW <= 0 || gDusk3DEyeH <= 0)
                     continue;
+                // Fenced hand-off (IRONJ item 1): wait for Dawn to finish writing this
+                // eye before reading it. aurora exports the MTLSharedEvent from
+                // SharedTextureMemory::EndAccess; without this the blit races the engine's
+                // render across two queues (tearing -- device-only, the sim serialises
+                // enough to hide it). No event published = feature unavailable = the old
+                // unfenced path, unchanged.
+                id<MTLSharedEvent> readyEvent = (id<MTLSharedEvent>)Dusk3D_GetEyeReadyEvent(e + 1);
+                if (readyEvent) {
+                    [command_buffer encodeWaitForEvent:readyEvent
+                                                 value:Dusk3D_GetEyeReadyValue(e + 1)];
+                    if (!dusk3d_eyeFenceLogged[e]) {
+                        dusk3d_eyeFenceLogged[e] = true;
+                        NSLog(@"[Dusk3D] eye %d fenced (MTLSharedEvent)", e);
+                    }
+                }
                 // Wrap the engine's eye IOSurface as an MTLTexture on THIS device
                 // (cached by identity). This is the Q-004 interop: Dawn wrote the game
                 // frame into the IOSurface; Metal reads it here.
+                //
+                // sRGB view (IRONJ item 3): the bytes in the IOSurface are the game's
+                // sRGB-ENCODED output. Viewing them as _sRGB makes the sampler decode in
+                // hardware (exact toe, and mip generation + linear filtering then run in
+                // linear light, which pow(2.2) after the filter could never do). The quad
+                // shader's manual decode is switched off for this source below.
                 if (dusk3d_eyeSrcSurface[e] != ios || dusk3d_eyeSrcTex[e] == nil) {
                     MTLTextureDescriptor* sd = [MTLTextureDescriptor
-                        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB
                                                      width:(NSUInteger)gDusk3DEyeW
                                                     height:(NSUInteger)gDusk3DEyeH
                                                  mipmapped:NO];
@@ -436,6 +459,10 @@ void Dusk3D_Immersive_Run(cp_layer_renderer_t layer_renderer) {
             float srgbDecode = 0.0f;
             {
                 MTLPixelFormat sf = monoTex.pixelFormat, df = color0.pixelFormat;
+                // The eye textures are now sRGB VIEWS (see the wrap above), so the sampler
+                // already returns linear and the shader must NOT decode again. The manual
+                // pow(2.2) path survives only for a non-sRGB source -- i.e. the built-in
+                // test pattern (RGBA8Unorm), which is authored in sRGB space.
                 BOOL srcEncoded = (sf == MTLPixelFormatBGRA8Unorm || sf == MTLPixelFormatRGBA8Unorm);
                 BOOL dstLinear = (df == MTLPixelFormatBGRA8Unorm_sRGB || df == MTLPixelFormatRGBA8Unorm_sRGB ||
                                   df == MTLPixelFormatRGBA16Float);
@@ -526,6 +553,7 @@ void Dusk3D_Immersive_Run(cp_layer_renderer_t layer_renderer) {
     }
 
     dusk3d_eyeCopy[0] = dusk3d_eyeCopy[1] = nil;
+    dusk3d_eyeFenceLogged[0] = dusk3d_eyeFenceLogged[1] = false;
     dusk3d_testPattern = nil;
     if (notifyEnded)
         Dusk3D_Immersive_Ended();

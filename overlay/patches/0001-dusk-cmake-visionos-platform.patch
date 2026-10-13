@@ -16,7 +16,15 @@ The visionOS resource dir is indirected through DUSK_VISIONOS_RESOURCE_DIR so
 the port's Info.plist/icons can live outside the vendor tree (upstream stays
 pristine); it defaults to platforms/visionos.
 
-Discord is gated OUT on visionOS: the SDK ships no xros slice.
+Discord is gated OUT on visionOS: the SDK ships no xros slice. (Since the
+2026-10 upstream sync Discord lives in borealis; that gate is in patch 0040.)
+
+2026-10 sync: four edits were DROPPED because upstream now does the right thing
+itself -- hardened runtime + ad-hoc codesign are gated on CMAKE_SYSTEM_NAME
+STREQUAL "Darwin" (false on visionOS), the AppKit/UIKit file-select dialogs moved
+into extern/borealis (patched by 0040), and cmake/DetectVersion.cmake moved to
+borealis, whose platform name falls through to tolower(CMAKE_SYSTEM_NAME) =
+"visionos" correctly.
 
 The Apple exports/stub step is skipped on visionOS entirely. symgen (a pinned
 prebuilt third-party binary, encounter/symgen v1.2.3) cannot read xrOS Mach-O
@@ -24,35 +32,27 @@ objects -- it scans them, reports "0 exports from 2053 objects", and then hard
 -fails with "No symbols in dusklight_exports.exp". It also rejects
 `--platform visionos` outright ("expected macos, ios, or tvos"), so there is no
 flag that makes it work. That step exists only to let code mods link against the
-game (DUSK_ENABLE_CODE_MODS, default OFF); the game links fine without it. The
+game (DUSK_ENABLE_CODE_MODS -- upstream flipped its default to ON in 2026, so
+the build scripts pass -DDUSK_ENABLE_CODE_MODS=OFF); the game links fine without it. The
 patch fails loudly if code mods are requested on visionOS rather than silently
 producing an empty exports list. Revisit via SYMGEN_PATH.
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -19,6 +19,12 @@
+@@ -18,6 +18,12 @@
+ if (APPLE AND NOT TVOS AND CMAKE_SYSTEM_NAME STREQUAL tvOS)
+     # ios.toolchain.cmake hack for SDL
      set(TVOS ON)
-     set(IOS OFF)
- endif ()
++    set(IOS OFF)
++endif ()
 +if (APPLE AND NOT VISIONOS AND CMAKE_SYSTEM_NAME STREQUAL visionOS)
 +    # Same hack for visionOS: the toolchain sets VISIONOS, but
 +    # CMAKE_SYSTEM_NAME is re-derived per sub-project().
 +    set(VISIONOS ON)
-+    set(IOS OFF)
-+endif ()
- 
- if(APPLE AND NOT CMAKE_OSX_SYSROOT)
-     # If the Xcode SDK is lagging behind system version, CMake needs this done first
-@@ -374,7 +380,7 @@
-     set(DUSK_ENABLE_DISCORD_DEFAULT ${DUSK_ENABLE_DISCORD_RPC})
- endif ()
- option(DUSK_ENABLE_DISCORD "Enable Discord Rich Presence support" ${DUSK_ENABLE_DISCORD_DEFAULT})
--if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS)
-+if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS AND NOT VISIONOS)
-     list(APPEND GAME_COMPILE_DEFS DUSK_DISCORD=1)
+     set(IOS OFF)
  endif ()
  
-@@ -490,7 +496,23 @@
+@@ -468,7 +474,23 @@
  if (WIN32)
      target_link_libraries(dusklight PRIVATE Psapi)
  endif ()
@@ -77,7 +77,7 @@ producing an empty exports list. Revisit via SYMGEN_PATH.
      include(cmake/AppleExports.cmake)
      setup_apple_exports(dusklight)
  elseif (ANDROID)
-@@ -573,6 +595,11 @@
+@@ -550,6 +572,11 @@
  if (APPLE)
      if (IOS)
          set(DUSK_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios)
@@ -89,18 +89,11 @@ producing an empty exports list. Revisit via SYMGEN_PATH.
      elseif (TVOS)
          set(DUSK_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/tvos)
      else ()
-@@ -612,13 +639,48 @@
-         list(APPEND _apple_bundle_properties
-             XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS ${DUSK_ENTITLEMENTS})
-     endif ()
--    if (NOT IOS AND NOT TVOS)
-+    if (NOT IOS AND NOT TVOS AND NOT VISIONOS)
-         list(APPEND _apple_bundle_properties
+@@ -594,6 +621,41 @@
              XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES")
      endif ()
      set_target_properties(dusklight PROPERTIES ${_apple_bundle_properties})
- 
--    if (NOT IOS AND NOT TVOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")
++
 +    if (VISIONOS)
 +        if (PLATFORM STREQUAL "SIMULATOR_VISIONOS")
 +            set(CMAKE_Swift_COMPILER_TARGET "arm64-apple-xros${CMAKE_OSX_DEPLOYMENT_TARGET}-simulator")
@@ -135,36 +128,6 @@ producing an empty exports list. Revisit via SYMGEN_PATH.
 +            "SHELL:-L ${CMAKE_OSX_SYSROOT}/usr/lib/swift"
 +            "SHELL:-Wl,-rpath,/usr/lib/swift")
 +    endif ()
-+
-+    if (NOT IOS AND NOT TVOS AND NOT VISIONOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")
+ 
+     if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")
          set(_sign_nested_commands)
-         if (TARGET crashpad_handler)
-             list(APPEND _sign_nested_commands
-@@ -635,14 +697,14 @@
-     endif ()
- endif ()
- 
--if (APPLE AND NOT IOS AND NOT TVOS)
-+if (APPLE AND NOT IOS AND NOT TVOS AND NOT VISIONOS)
-     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
-     target_sources(dusklight PRIVATE src/dusk/file_select_macos.mm)
-     set_source_files_properties(src/dusk/file_select_macos.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
-     target_link_libraries(dusklight PRIVATE ${APPKIT_FRAMEWORK})
- endif ()
- 
--if (IOS)
-+if (IOS OR VISIONOS)
-     find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
-     find_library(UNIFORM_TYPE_IDENTIFIERS_FRAMEWORK UniformTypeIdentifiers REQUIRED)
-     target_sources(dusklight PRIVATE src/dusk/ios/FileSelectDialog.m)
---- a/cmake/DetectVersion.cmake
-+++ b/cmake/DetectVersion.cmake
-@@ -105,6 +105,8 @@
- macro(configure_version_header)
-     if (CMAKE_SYSTEM_NAME STREQUAL Windows)
-         set(PLATFORM_NAME win32)
-+    elseif (VISIONOS)
-+        set(PLATFORM_NAME visionos)
-     elseif (CMAKE_SYSTEM_NAME STREQUAL Darwin)
-         if (IOS)
-             set(PLATFORM_NAME ios)

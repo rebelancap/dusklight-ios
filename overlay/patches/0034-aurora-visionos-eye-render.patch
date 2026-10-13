@@ -11,7 +11,7 @@ adjacency to 0032's aurora.cpp hunks.
 
 --- a/extern/aurora/lib/webgpu/gpu.cpp
 +++ b/extern/aurora/lib/webgpu/gpu.cpp
-@@ -915,6 +915,13 @@
+@@ -949,6 +949,13 @@
          }
          requiredFeatures.push_back(feature);
        }

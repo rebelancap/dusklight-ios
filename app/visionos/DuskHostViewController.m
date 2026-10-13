@@ -31,11 +31,34 @@ void* volatile gDusk3DEyeSurfaces[2] = { NULL, NULL };  // IOSurfaceRef, written
 volatile int gDusk3DEyeW = 0;
 volatile int gDusk3DEyeH = 0;
 
+// Fenced hand-off (IRONJ item 1). aurora exports Dawn's MTLSharedEvent for each eye
+// out of SharedTextureMemory::EndAccess and publishes it (retained) here with the value
+// it will signal; the immersive loop encodeWaitForEvent's on it before blitting, instead
+// of trusting the frame counter alone. NULL event = no fence exported (a device/driver
+// without SharedFenceMTLSharedEvent) -> the loop keeps the old unfenced path.
+void* volatile gDusk3DEyeReadyEvent[2] = { NULL, NULL };        // id<MTLSharedEvent>
+volatile unsigned long long gDusk3DEyeReadyValue[2] = { 0, 0 };
+
 void* Dusk3D_GetEyeIOSurface(int eye) {
     if (eye < 1 || eye > 2) {
         return NULL;
     }
     return gDusk3DEyeFrames[eye - 1] > 0 ? gDusk3DEyeSurfaces[eye - 1] : NULL;
+}
+
+void* Dusk3D_GetEyeReadyEvent(int eye) {
+    if (eye < 1 || eye > 2) {
+        return NULL;
+    }
+    // Same gate as the surface: nothing has been rendered (or fenced) until frames > 0.
+    return gDusk3DEyeFrames[eye - 1] > 0 ? gDusk3DEyeReadyEvent[eye - 1] : NULL;
+}
+
+unsigned long long Dusk3D_GetEyeReadyValue(int eye) {
+    if (eye < 1 || eye > 2) {
+        return 0;
+    }
+    return gDusk3DEyeReadyValue[eye - 1];
 }
 
 void* Dusk3D_GetEyeMTLTexture(int eye) {

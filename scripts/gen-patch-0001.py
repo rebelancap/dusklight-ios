@@ -17,7 +17,15 @@ The visionOS resource dir is indirected through DUSK_VISIONOS_RESOURCE_DIR so
 the port's Info.plist/icons can live outside the vendor tree (upstream stays
 pristine); it defaults to platforms/visionos.
 
-Discord is gated OUT on visionOS: the SDK ships no xros slice.
+Discord is gated OUT on visionOS: the SDK ships no xros slice. (Since the
+2026-10 upstream sync Discord lives in borealis; that gate is in patch 0040.)
+
+2026-10 sync: four edits were DROPPED because upstream now does the right thing
+itself -- hardened runtime + ad-hoc codesign are gated on CMAKE_SYSTEM_NAME
+STREQUAL "Darwin" (false on visionOS), the AppKit/UIKit file-select dialogs moved
+into extern/borealis (patched by 0040), and cmake/DetectVersion.cmake moved to
+borealis, whose platform name falls through to tolower(CMAKE_SYSTEM_NAME) =
+"visionos" correctly.
 
 The Apple exports/stub step is skipped on visionOS entirely. symgen (a pinned
 prebuilt third-party binary, encounter/symgen v1.2.3) cannot read xrOS Mach-O
@@ -25,7 +33,8 @@ objects -- it scans them, reports "0 exports from 2053 objects", and then hard
 -fails with "No symbols in dusklight_exports.exp". It also rejects
 `--platform visionos` outright ("expected macos, ios, or tvos"), so there is no
 flag that makes it work. That step exists only to let code mods link against the
-game (DUSK_ENABLE_CODE_MODS, default OFF); the game links fine without it. The
+game (DUSK_ENABLE_CODE_MODS -- upstream flipped its default to ON in 2026, so
+the build scripts pass -DDUSK_ENABLE_CODE_MODS=OFF); the game links fine without it. The
 patch fails loudly if code mods are requested on visionOS rather than silently
 producing an empty exports list. Revisit via SYMGEN_PATH.
 """
@@ -59,12 +68,6 @@ EDITS = [
             'endif ()\n',
             1,
         ),
-        # 2. Discord has no xros slice.
-        (
-            'if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS)\n',
-            'if (DUSK_ENABLE_DISCORD AND NOT ANDROID AND NOT IOS AND NOT TVOS AND NOT VISIONOS)\n',
-            1,
-        ),
         # 3. Resource dir: visionOS gets its own, indirectable out of vendor.
         (
             '    if (IOS)\n'
@@ -81,23 +84,6 @@ EDITS = [
             '        set(DUSK_RESOURCE_DIR ${DUSK_VISIONOS_RESOURCE_DIR})\n'
             '    elseif (TVOS)\n'
             '        set(DUSK_RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/tvos)\n',
-            1,
-        ),
-        # 4. Hardened runtime is a macOS-only Xcode attribute.
-        (
-            '    if (NOT IOS AND NOT TVOS)\n'
-            '        list(APPEND _apple_bundle_properties\n'
-            '            XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES")\n',
-
-            '    if (NOT IOS AND NOT TVOS AND NOT VISIONOS)\n'
-            '        list(APPEND _apple_bundle_properties\n'
-            '            XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES")\n',
-            1,
-        ),
-        # 5. The ad-hoc codesign-with-entitlements step is macOS-only.
-        (
-            '    if (NOT IOS AND NOT TVOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")\n',
-            '    if (NOT IOS AND NOT TVOS AND NOT VISIONOS AND NOT "${CMAKE_GENERATOR}" STREQUAL "Xcode")\n',
             1,
         ),
         # 5b. Phase 2 (M1): compile the SwiftUI @main shell into the app under the
@@ -153,24 +139,6 @@ EDITS = [
             '    endif ()\n',
             1,
         ),
-        # 6. AppKit does not exist on visionOS -> this was the configure failure.
-        (
-            'if (APPLE AND NOT IOS AND NOT TVOS)\n'
-            '    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)\n',
-
-            'if (APPLE AND NOT IOS AND NOT TVOS AND NOT VISIONOS)\n'
-            '    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)\n',
-            1,
-        ),
-        # 7. visionOS is UIKit-family: take the iOS file-select dialog.
-        (
-            'if (IOS)\n'
-            '    find_library(UIKIT_FRAMEWORK UIKit REQUIRED)\n',
-
-            'if (IOS OR VISIONOS)\n'
-            '    find_library(UIKIT_FRAMEWORK UIKit REQUIRED)\n',
-            1,
-        ),
         # 8. Skip the symgen exports/stub step on visionOS. See module docstring.
         (
             'if (APPLE)\n'
@@ -198,34 +166,6 @@ EDITS = [
             '    include(cmake/AppleExports.cmake)\n'
             '    setup_apple_exports(dusklight)\n'
             'elseif (ANDROID)\n',
-            1,
-        ),
-    ]),
-    # ---- cmake/DetectVersion.cmake ------------------------------------------
-    ("cmake/DetectVersion.cmake", [
-        # The Apple branch is guarded by `CMAKE_SYSTEM_NAME STREQUAL Darwin`, but
-        # ios.toolchain.cmake sets CMAKE_SYSTEM_NAME to visionOS (and iOS/tvOS for
-        # those), so that branch never runs for any embedded Apple platform and we
-        # fall into the else, whose
-        #     string(TOLOWER CMAKE_SYSTEM_NAME PLATFORM_NAME)
-        # is missing its ${} and lowercases the *literal name*. The running app
-        # logged the proof: "Platform: cmake_system_name".
-        #
-        # That is a pre-existing upstream bug which equally affects iOS and tvOS.
-        # It is NOT fixed here: correcting the guard to `elseif (APPLE)` would
-        # change PLATFORM_NAME for iOS/tvOS too, and the charter requires leaving
-        # the other targets byte-for-byte alone. Test visionOS ahead of the Darwin
-        # check instead, so only visionOS changes.
-        (
-            '    if (CMAKE_SYSTEM_NAME STREQUAL Windows)\n'
-            '        set(PLATFORM_NAME win32)\n'
-            '    elseif (CMAKE_SYSTEM_NAME STREQUAL Darwin)\n',
-
-            '    if (CMAKE_SYSTEM_NAME STREQUAL Windows)\n'
-            '        set(PLATFORM_NAME win32)\n'
-            '    elseif (VISIONOS)\n'
-            '        set(PLATFORM_NAME visionos)\n'
-            '    elseif (CMAKE_SYSTEM_NAME STREQUAL Darwin)\n',
             1,
         ),
     ]),

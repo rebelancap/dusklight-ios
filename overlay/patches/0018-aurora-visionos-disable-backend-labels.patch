@@ -34,9 +34,12 @@ texture's size/format/label, so if it somehow still aborts we see exactly what.
 
 Three hunks: TargetConditionals include, enable-list gate (kept), disable-list add.
 
+2026-10 sync: upstream appended an Adreno toggle to disableToggles; the
+visionOS entry now anchors after it. Same three hunks.
+
 --- a/extern/aurora/lib/webgpu/gpu.cpp
 +++ b/extern/aurora/lib/webgpu/gpu.cpp
-@@ -8,6 +8,10 @@
+@@ -10,6 +10,10 @@
  #include <string_view>
  #include <utility>
  #include <vector>
@@ -46,8 +49,8 @@ Three hunks: TargetConditionals include, enable-list gate (kept), disable-list a
 +#endif
  
  #include <aurora/aurora.h>
- #include <aurora/gfx.h>
-@@ -942,7 +946,7 @@
+ #include <aurora/webgpu.hpp>
+@@ -979,7 +983,7 @@
          "skip_validation",
          "disable_robustness",
  #endif
@@ -55,11 +58,11 @@ Three hunks: TargetConditionals include, enable-list gate (kept), disable-list a
 +#if !defined(ANDROID) && !(defined(__APPLE__) && TARGET_OS_VISION)
          "use_user_defined_labels_in_backend",
  #endif
-         "allow_unsafe_apis",
-@@ -952,6 +956,12 @@
-     };
-     constexpr std::array disableToggles{
-         "timestamp_quantization",
+         "disable_symbol_renaming",
+@@ -991,6 +995,12 @@
+         // Adreno strikes again!
+         // https://github.com/TwilitRealm/dusklight/issues/2563
+         "use_spirv_reconvergence_mode",
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +        // Force OFF: MakeDebugName formats the user label, aurora sets replacement
 +        // labels via `.label = c_str()` -> StringView length = WGPU_STRLEN (SIZE_MAX)

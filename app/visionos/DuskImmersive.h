@@ -37,6 +37,12 @@ void* Dusk3D_GetEyeIOSurface(int eye);   // IOSurfaceRef the loop wraps as an MT
 int Dusk3D_GetEyeFrames(int eye);        // completed renders per eye (liveness)
 extern volatile int gDusk3DEyeW;         // eye texture size (aurora publishes it with the surface)
 extern volatile int gDusk3DEyeH;
+// Fenced hand-off (IRONJ item 1): the MTLSharedEvent aurora exports from Dawn's
+// SharedTextureMemory::EndAccess for this eye, plus the value it signals on completion.
+// The loop waits on it before blitting the IOSurface. NULL = no fence exported; the
+// loop then blits unfenced exactly as it did before.
+void* Dusk3D_GetEyeReadyEvent(int eye);          // 1=left, 2=right; id<MTLSharedEvent> or NULL
+unsigned long long Dusk3D_GetEyeReadyValue(int eye);
 
 // Phase-lock (guide §3.7): the immersive loop signals once per compositor frame
 // (right after its cp_time_wait_until pace point); aurora's game loop, while in

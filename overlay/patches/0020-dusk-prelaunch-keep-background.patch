@@ -15,12 +15,15 @@ Fix: keep the background at full opacity in the disc-ready state too, so the sce
 fills the window in BOTH states, matching the pre-disc look. One value change
 (0 -> 1) in the res stylesheet; no layout math touched.
 
+2026-10 sync: upstream turned the .background div into a <prelaunch-background>
+element; same rule, same 0 -> 1 change, new selector.
+
 --- a/res/rml/prelaunch.rcss
 +++ b/res/rml/prelaunch.rcss
-@@ -44,7 +44,9 @@
+@@ -52,7 +52,9 @@
  }
  
- body.disc-ready .background {
+ body.disc-ready prelaunch-background {
 -    opacity: 0;
 +    /* Keep the scene visible when a disc is ready: on a wide visionOS window
 +       fading it out leaves the right side empty black (menu is left-aligned). */

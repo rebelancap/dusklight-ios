@@ -15,6 +15,9 @@ pre-disc state (IMG_0157) keeps the scene and already fills.
 Fix: keep the background at full opacity in the disc-ready state too, so the scene
 fills the window in BOTH states, matching the pre-disc look. One value change
 (0 -> 1) in the res stylesheet; no layout math touched.
+
+2026-10 sync: upstream turned the .background div into a <prelaunch-background>
+element; same rule, same 0 -> 1 change, new selector.
 """
 import subprocess, pathlib, tempfile
 
@@ -24,10 +27,10 @@ SRC = ROOT / "vendor/dusklight" / REL
 
 orig = SRC.read_text()
 
-old = ('body.disc-ready .background {\n'
+old = ('body.disc-ready prelaunch-background {\n'
        '    opacity: 0;\n'
        '}\n')
-new = ('body.disc-ready .background {\n'
+new = ('body.disc-ready prelaunch-background {\n'
        '    /* Keep the scene visible when a disc is ready: on a wide visionOS window\n'
        '       fading it out leaves the right side empty black (menu is left-aligned). */\n'
        '    opacity: 1;\n'

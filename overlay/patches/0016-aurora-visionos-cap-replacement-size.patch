@@ -37,13 +37,17 @@ standalone under ASan/UBSan (4096->2048, odd dims, averaging, no-op, no OOB).
 visionOS-gated; every other platform untouched. Compressed + non-32-bpp formats
 fall through unchanged.
 
+2026-10 sync: aurora moved this file into namespace aurora::texture, so the
+helper anchor now reads gfx::ConvertedTexture (the helper's fully-qualified
+aurora::gfx:: names still resolve). ConvertedTexture gained hasArbitraryMips;
+the clamp now clears it alongside mips = 1, since it drops the mip chain.
+
 --- a/extern/aurora/lib/gfx/texture_replacement.cpp
 +++ b/extern/aurora/lib/gfx/texture_replacement.cpp
-@@ -649,6 +649,82 @@
-   std::string mip_name() const { return mipPath; }
-   std::optional<aurora::gfx::ConvertedTexture> load_mip() { return decode(); }
+@@ -637,6 +637,83 @@
+   std::optional<gfx::ConvertedTexture> load_mip() { return decode(); }
  };
-+
+ 
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +// A 4K RGBA8 replacement is ~64MB (+mips); a pack full of them exhausts the
 +// app heap on visionOS during a texture-heavy moment (the opening cutscene) ->
@@ -110,6 +114,7 @@ fall through unchanged.
 +  tex.width = w;
 +  tex.height = h;
 +  tex.mips = 1;
++  tex.hasArbitraryMips = false; // mip chain dropped above
 +  static bool loggedOnce = false;
 +  if (!loggedOnce) {
 +    loggedOnce = true;
@@ -119,10 +124,11 @@ fall through unchanged.
 +  }
 +}
 +#endif
- 
++
  template <typename Source>
- std::optional<aurora::gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noexcept {
-@@ -666,6 +742,10 @@
+ std::optional<gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noexcept {
+   auto base = src.load_base();
+@@ -653,6 +730,10 @@
      return std::nullopt;
    }
  

@@ -13,11 +13,20 @@ measurement instead of a guess.
 
 visionOS-gated, diagnostic-only. Every other platform is untouched.
 
+2026-10 sync: aurora rewrote replacement loading (async full loads behind
+thumbnails; one cache_replacement_locked() for every tier; every Dawn texture
+for a decoded replacement now made in create_converted_texture_handle()). So:
+the helpers sit before create_converted_texture_handle (their first user), the
+first-creation log moved to the top of create_converted_texture_handle (still
+strictly BEFORE the first CreateTexture, now on every path incl. async), and the
+"N created" log moved to the end of cache_replacement_locked (counts cached
+textures, thumbnails included).
+
 --- a/extern/aurora/lib/gfx/texture_replacement.cpp
 +++ b/extern/aurora/lib/gfx/texture_replacement.cpp
-@@ -28,6 +28,14 @@
- #include <string>
- #include <string_view>
+@@ -37,6 +37,14 @@
+ #include <unordered_map>
+ #include <unordered_set>
  #include <vector>
 +
 +#if defined(__APPLE__)
@@ -28,10 +37,10 @@ visionOS-gated, diagnostic-only. Every other platform is untouched.
 +#endif
 +#endif
  
- using namespace aurora::gx;
- using aurora::webgpu::g_device;
-@@ -980,6 +988,22 @@
-   return handle;
+ namespace aurora::texture {
+ namespace {
+@@ -1049,8 +1057,32 @@
+   return entry.kind == EntryKind::Virtual ? entry.virtualPath : io::fs_path_to_string(entry.path);
  }
  
 +#if defined(__APPLE__) && TARGET_OS_VISION
@@ -50,13 +59,8 @@ visionOS-gated, diagnostic-only. Every other platform is untouched.
 +}
 +#endif
 +
- std::optional<aurora::gfx::TextureHandle>
- find_replacement_for_key_locked(const aurora::texture::ReplacementKey& key) noexcept {
-   const auto* entry = find_selected_entry_locked(key);
-@@ -993,6 +1017,14 @@
-   }
- 
-   erase_cache_locked(key);
+ gfx::TextureHandle create_converted_texture_handle(const EntryLoadSnapshot& entry,
+                                                    const gfx::ConvertedTexture& replacement) noexcept {
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +  static bool s_loggedFirstCreate = false;
 +  if (!s_loggedFirstCreate) {
@@ -65,11 +69,11 @@ visionOS-gated, diagnostic-only. Every other platform is untouched.
 +             available_memory_mib(), current_phys_footprint_mib());
 +  }
 +#endif
-   auto handle = load_entry_handle(key, *entry);
-   if (!handle) {
-     return std::nullopt;
-@@ -1006,6 +1038,15 @@
-       SelectedCache{.handle = handle, .id = entry->id, .bytes = replacementBytes, .lruIt = s_replacementLru.begin()});
+   const auto label = entry.label.empty() ? fmt::format("TextureReplacement {}", entry.id) : entry.label;
+   const wgpu::Extent3D size{
+       .width = replacement.width,
+@@ -1154,6 +1186,15 @@
+                             });
    s_replacementCacheBytes += replacementBytes;
    evict_replacement_cache_if_needed();
 +#if defined(__APPLE__) && TARGET_OS_VISION
@@ -81,6 +85,6 @@ visionOS-gated, diagnostic-only. Every other platform is untouched.
 +             available_memory_mib());
 +  }
 +#endif
-   return handle;
  }
  
+ const ReplacementEntry* select_entry(const std::vector<ReplacementEntry>& entries) noexcept {

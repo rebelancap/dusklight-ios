@@ -20,6 +20,13 @@ next to config.json; texture_replacements/ etc. are skipped).
 Placed right after the existing bad-path invalidation (m_Do_main.cpp ~725),
 before the empty path forces the prelaunch UI. Clear of every other patch's
 hunks (0015 touches this file only near line 568).
+
+2026-10 sync: upstream reworked this block for borealis io locations (bookmarks)
+and renamed dvd_path -> dvdLocation/dvdPath; the scan now sits after the
+invalidation and before skipPreLaunchUI is read, and uses borealis::io for the
+path string. Still needed: upstream's own disc persistence (bookmarks / Documents/
+imported, which retired patch 0028) does not cover a fresh install where the user
+drops the disc into Documents via Files.
 """
 import subprocess, pathlib, tempfile
 
@@ -33,7 +40,7 @@ old = ('        forcePreLaunchUI = true;\n'
        '        saveConfigBeforePrelaunch = true;\n'
        '    }\n'
        '\n'
-       '    std::string dvd_path = dusk::getSettings().backend.isoPath;\n')
+       '    bool skipPreLaunchUI = dusk::getSettings().backend.skipPreLaunchUI.getValue();\n')
 
 new = ('        forcePreLaunchUI = true;\n'
        '        saveConfigBeforePrelaunch = true;\n'
@@ -58,7 +65,7 @@ new = ('        forcePreLaunchUI = true;\n'
        '            dusk::iso::DiscInfo scanInfo{};\n'
        '            if (dusk::iso::inspect(scanIt->path().string().c_str(), scanInfo) ==\n'
        '                dusk::iso::ValidationError::Success) {\n'
-       '                const std::string found = dusk::io::fs_path_to_string(scanIt->path());\n'
+       '                const std::string found = borealis::io::fs_path_to_string(scanIt->path());\n'
        '                DuskLog.info("Auto-discovered a valid disc image in the data dir: {}", found);\n'
        '                dusk::getSettings().backend.isoPath.setValue(found);\n'
        '                dusk::getSettings().backend.isoVerification.setValue(\n'
@@ -71,7 +78,7 @@ new = ('        forcePreLaunchUI = true;\n'
        '        }\n'
        '    }\n'
        '\n'
-       '    std::string dvd_path = dusk::getSettings().backend.isoPath;\n')
+       '    bool skipPreLaunchUI = dusk::getSettings().backend.skipPreLaunchUI.getValue();\n')
 
 assert orig.count(old) == 1, f"anchor: {orig.count(old)}"
 text = orig.replace(old, new)

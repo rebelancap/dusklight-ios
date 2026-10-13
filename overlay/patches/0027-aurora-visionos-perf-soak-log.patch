@@ -14,9 +14,12 @@ independently; wall frame time + thermal already separate throttling from pacing
 visionOS-gated; in aurora::update() (runs every frame). SDL_GetTicks for a
 wall-clock 5 s cadence independent of fps.
 
+2026-10 sync: update() gained an AURORA_ENABLE_GX gx::update() call; the soak
+block still sits right before poll_events().
+
 --- a/extern/aurora/lib/aurora.cpp
 +++ b/extern/aurora/lib/aurora.cpp
-@@ -22,6 +22,17 @@
+@@ -29,6 +29,17 @@
  #include <magic_enum.hpp>
  
  #include "system_info.hpp"
@@ -34,11 +37,11 @@ wall-clock 5 s cadence independent of fps.
  #include "tracy/Tracy.hpp"
  
  namespace aurora {
-@@ -214,7 +225,30 @@
-   if (g_initialFrame) {
-     g_initialFrame = false;
-     input::initialize();
-+  }
+@@ -229,6 +240,29 @@
+   }
+ #ifdef AURORA_ENABLE_GX
+   gx::update();
++#endif
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +  {
 +    // Soak trace: log the perf/thermal/memory picture every 5 s so a play
@@ -60,8 +63,7 @@ wall-clock 5 s cadence independent of fps.
 +      Log.info("perf soak: {:.0f} fps  {:.1f} ms  thermal {}  footprint {} MiB  available {} MiB", fps,
 +               frameMs, aurora_get_thermal_state(), footprintMiB, availMiB);
 +    }
-   }
-+#endif
++  }
+ #endif
    return window::poll_events();
  }
- 

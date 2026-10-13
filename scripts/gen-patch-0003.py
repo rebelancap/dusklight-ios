@@ -24,6 +24,11 @@ visionOS is UIKit-family and UIDocumentPickerViewController works there, so
 select the iOS dialog. Consistent with patch 0001 compiling
 src/dusk/ios/FileSelectDialog.m under `if (IOS OR VISIONOS)`.
 
+2026-10 sync: upstream moved file_select.cpp into extern/borealis
+(src/file_select/file_select.cpp) and renamed the macros to
+BOREALIS_USE_{IOS_FILE_DIALOG,MACOS_FOLDER_DIALOG}; same two gates, same fix. The
+UIKit sources (ios.mm / ios_import.mm) are compiled on visionOS by patch 0040.
+
 TARGET_OS_VISION needs no #ifndef guard: TargetConditionals.h is already
 included above, and an undefined identifier evaluates to 0 inside #if, so older
 SDKs keep their current behavior.
@@ -31,7 +36,7 @@ SDKs keep their current behavior.
 import subprocess, pathlib, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-REL = "src/dusk/file_select.cpp"
+REL = "extern/borealis/src/file_select/file_select.cpp"
 SRC = ROOT / "vendor/dusklight" / REL
 
 orig = SRC.read_text()
@@ -40,19 +45,20 @@ text = orig
 EDITS = [
     (
         '#if defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST\n'
-        '#define USE_MACOS_FOLDER_DIALOG 1\n',
+        '#define BOREALIS_USE_MACOS_FOLDER_DIALOG 1\n',
 
         '#if defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST && \\\n'
         '    !TARGET_OS_VISION\n'
-        '#define USE_MACOS_FOLDER_DIALOG 1\n',
+        '#define BOREALIS_USE_MACOS_FOLDER_DIALOG 1\n',
         1,
     ),
     (
-        '#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST\n'
-        '#define USE_IOS_DIALOG 1\n',
+        '#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST\n'
+        '#define BOREALIS_USE_IOS_FILE_DIALOG 1\n',
 
-        '#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_MACCATALYST\n'
-        '#define USE_IOS_DIALOG 1\n',
+        '#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && \\\n'
+        '    !TARGET_OS_MACCATALYST\n'
+        '#define BOREALIS_USE_IOS_FILE_DIALOG 1\n',
         1,
     ),
 ]

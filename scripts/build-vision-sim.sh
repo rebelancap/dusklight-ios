@@ -13,6 +13,11 @@
 #                                                 ios-arm64 but not visionos)
 # The iOS/tvOS/macOS targets are untouched.
 #
+# DUSK_ENABLE_CODE_MODS=OFF: upstream flipped this option's default to ON in 2026;
+# code mods cannot work on visionOS (symgen emits no exports for xrOS objects, and a
+# sandboxed app cannot load unsigned mod dylibs) and patch 0001 fails the configure
+# if they are requested -- so every visionOS build script passes OFF (D-005).
+#
 # CMAKE_IGNORE_PREFIX_PATH also lists Miniforge3: aurora does a bare
 # find_package(fmt)/find_package(zstd) and will happily resolve them to host
 # *macOS dylibs* from any conda-ish prefix on PATH, which then fail the link
@@ -53,6 +58,7 @@ cmake --no-warn-unused-cli -S "$VENDOR" -B "$BUILD" -GNinja \
     -DAURORA_DAWN_LINKAGE=static \
     -DDAWN_BUILD_PROTOBUF=OFF \
     -DTINT_BUILD_IR_BINARY=OFF \
+    -DDUSK_ENABLE_CODE_MODS=OFF \
     -DDUSK_VISIONOS_RESOURCE_DIR="$ROOT/app/visionos" \
     "$@"
 

@@ -34,6 +34,14 @@ UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace, so Documents becomes
 browsable and droppable, and config.json landing there at first launch is enough
 to make the app appear in Files on its own.
 
+2026-10 sync: upstream moved the data-folder logic into extern/borealis
+(src/data.cpp, borealis::data::Manager). The Documents choice is now
+`environment.isIOS && options.defaultPath.useDocumentsOnIOS` (dusk sets
+useDocumentsOnIOS = true), and isIOS is set under the same TARGET_OS_IOS-only
+gate -- so the fix moves with it. isIOS also drives canChangeLocation = false,
+which is the old DUSK_CAN_CHANGE_DATA_FOLDER half of patch 0005: one gate now
+covers both, exactly as on iOS.
+
 TARGET_OS_VISION needs no #ifndef guard: TargetConditionals.h is reached via the
 enclosing #ifdef __APPLE__, and an undefined identifier evaluates to 0 inside
 #if, so older SDKs and every other platform keep their current behavior. iOS is
@@ -42,17 +50,16 @@ untouched.
 import subprocess, pathlib, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-REL = "src/dusk/data.cpp"
+REL = "extern/borealis/src/data.cpp"
 SRC = ROOT / "vendor/dusklight" / REL
 
 orig = SRC.read_text()
 
-old = ('#ifdef __APPLE__\n'
-       '#if TARGET_OS_IOS && !TARGET_OS_TV\n'
-       '    const char* documentsPath = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);\n')
-new = ('#ifdef __APPLE__\n'
-       '#if (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV\n'
-       '    const char* documentsPath = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);\n')
+old = ('#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST\n'
+       '    environment.isIOS = true;\n')
+new = ('#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV &&            \\\n'
+       '    !TARGET_OS_MACCATALYST\n'
+       '    environment.isIOS = true;\n')
 
 n = orig.count(old)
 assert n == 1, f"expected 1 match, got {n}"

@@ -1,0 +1,59 @@
+Overlay patch 0041: stop the mod catalog/loader from treating visionOS as macOS.
+
+New with the 2026-10 upstream sync, which added an online mod catalog
+(src/dusk/mods/catalog.cpp) and native-code mod loading (mods/loader/natives.cpp)
+that are compiled in even with DUSK_ENABLE_CODE_MODS=OFF. Both pick the platform
+with TARGET_OS_IOS, which is 0 on visionOS (D-009), so xrOS fell through to the
+`__APPLE__ && !TARGET_OS_TV && __aarch64__` branch and called itself "macos-arm64":
+
+  * catalog_platform() would ask the catalog for macOS packages, and
+  * supports_native_installs() said TRUE -- offering to download a macOS dylib that
+    a sandboxed visionOS app can never load (it is unsigned and the wrong platform);
+  * natives.cpp would look for "native/macos-arm64/" libraries inside mods.
+
+Fix, visionOS-only:
+  1. catalog.cpp: visionOS reports the iOS package platform ("ios-arm64") -- the
+     same UIKit-family answer iOS gives -- and, like iOS/tvOS, does NOT support
+     native installs ("Native libraries must be bundled and signed with the app").
+     Asset-only mods (texture/audio packs) still browse and install.
+  2. natives.cpp: visionOS has NO native mod platform (empty string), so the loader
+     never tries to dlopen anything; a mod that needs natives reports "Mod not
+     supported on this platform", which is the truth on this port.
+
+Conservative by construction: it only removes a capability that could not work.
+Every other platform evaluates exactly as before.
+
+--- a/src/dusk/mods/catalog.cpp
++++ b/src/dusk/mods/catalog.cpp
+@@ -48,7 +48,7 @@
+     return "windows-amd64";
+ #elif defined(__ANDROID__) && defined(__aarch64__)
+     return "android-aarch64";
+-#elif defined(__APPLE__) && TARGET_OS_IOS
++#elif defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION)
+     return "ios-arm64";
+ #elif defined(__APPLE__) && !TARGET_OS_TV && defined(__aarch64__)
+     return "macos-arm64";
+@@ -460,7 +460,7 @@
+ }
+ 
+ bool supports_native_installs() noexcept {
+-#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_TV)
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION)
+     // Native libraries must be bundled and signed with the app.
+     return false;
+ #else
+--- a/src/dusk/mods/loader/natives.cpp
++++ b/src/dusk/mods/loader/natives.cpp
+@@ -44,7 +44,10 @@
+ static constexpr std::string_view k_nativeLibName = "mod.so"sv;
+ #elif defined(__APPLE__)
+ #include <TargetConditionals.h>
+-#if TARGET_OS_IOS
++#if TARGET_OS_VISION
++// visionOS: no loadable native mod platform (sandboxed, unsigned dylibs never load).
++static constexpr std::string_view k_nativePlatform = ""sv;
++#elif TARGET_OS_IOS
+ static constexpr std::string_view k_nativePlatform = "ios-arm64"sv;
+ #elif TARGET_OS_TV
+ static constexpr std::string_view k_nativePlatform = "tvos-arm64"sv;

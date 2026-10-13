@@ -14,7 +14,7 @@ scoped). No label on the descriptors -- nothing to trip.
 
 --- a/extern/aurora/lib/webgpu/gpu.cpp
 +++ b/extern/aurora/lib/webgpu/gpu.cpp
-@@ -1052,6 +1052,41 @@
+@@ -1092,6 +1092,41 @@
    create_resample_pipeline();
    gpu_prof::initialize();
    resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);

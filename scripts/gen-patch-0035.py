@@ -30,6 +30,30 @@ Files, one concern (the render-side engine):
 aurora.cpp drives this (stereo_set_enabled/params + the per-eye callback) in patch
 0032; the camera distance feeding the convergence comes from patch 0036; the J3D
 tag-emission hooks (J3DTexMtxMode -> duskTagTexMtxClass) are patch 0037.
+
+2026-10 sync (aurora 1dde08fa -> 3227d76c): the engine is unchanged in design;
+upstream split gfx/common.{hpp,cpp} into modules, so the hunks moved with the code:
+  * gfx/common.hpp  -> gfx/resources.hpp (stereo externs + stereo_set_*, beside the
+                       now-Resources-owned bind-group layouts) and gfx/types.hpp
+                       (EndFrameCallback, which upstream extended with the frame's
+                       afterSubmitCallbacks: (encoder, afterSubmitCallbacks, eye, isLast)).
+  * gfx/common.cpp  -> gfx/frame.cpp (globals at aurora::gfx scope, init block, the
+                       per-frame worker write in begin_frame, the RIGHT-eye packet
+                       re-execution in end_frame via detail::encode_op from encoding.hpp).
+                       afterSubmitCallbacks go to the LAST callback only; encoder tasks
+                       re-run by the RIGHT execution push duplicates into the moved-from
+                       packet vector, which `packet = {}` drops -- each runs once.
+  * gx/command_processor.cpp XF memory writes -> gx/regs.cpp copy_xf_data (the 0x5F8
+                       tag parse + class resets). GXState.stateDirty is gone; a class
+                       CHANGE now sets DirtyPipeline (the tag feeds the pipeline config
+                       snapshot), and the untagged-write reset does the same when it
+                       actually clears a class (old code relied on the matrix write
+                       dirtying all state). The stereoClass bits are taken from the local
+                       `state` (= g_gxState) where DrawData is now built.
+  * gx/gx.cpp now builds its layout from gfx::detail::resources(); includes
+                       gfx/frame.hpp for current_frame(). shader.cpp: the false-color
+                       probe now sits before the new DstAlphaMode::Replace epilogue (the
+                       old anchor, shaderSource assembly, moved below normal attachments).
 """
 import subprocess, pathlib, tempfile
 
@@ -108,7 +132,7 @@ EDITS = {
          '    fragmentFn += "\\n    prev = vec4f(in.nrm, prev.a);";\n'
          '  }\n'
          '\n'
-         '  const auto shaderSource = fmt::format(R"""(\n',
+         '  if (dstAlphaMode == DstAlphaMode::Replace) {\n',
          '  if constexpr (EnableNormalVisualization) {\n'
          '    fragmentFn += "\\n    prev = vec4f(in.nrm, prev.a);";\n'
          '  }\n'
@@ -138,7 +162,7 @@ EDITS = {
          '        dbgNonOrtho);\n'
          '  }\n'
          '\n'
-         '  const auto shaderSource = fmt::format(R"""(\n'),
+         '  if (dstAlphaMode == DstAlphaMode::Replace) {\n'),
         # WATER-ANSWER fix: shift the projected texcoord chains (position-sourced / projective
         # -- the sky/reflection shine) by the mesh's per-eye parallax, gated on sp_txs.
         ('    }\n'
@@ -166,18 +190,19 @@ EDITS = {
          '      vtxXfrAttrs += fmt::format("\\n    out.tex{0}_uvw = tc{0}_proj.xyz;", i);\n'),
     ],
     "lib/gx/gx.cpp": [
-        ('        gfx::g_staticBindGroupLayout,\n'
-         '        gfx::g_uniformBindGroupLayout,\n'
+        ('        gfx::detail::resources().staticBindGroupLayout,\n'
+         '        gfx::detail::resources().uniformBindGroupLayout,\n'
          '        sTextureBindGroupLayout,\n'
          '    };\n',
-         '        gfx::g_staticBindGroupLayout,\n'
-         '        gfx::g_uniformBindGroupLayout,\n'
+         '        gfx::detail::resources().staticBindGroupLayout,\n'
+         '        gfx::detail::resources().uniformBindGroupLayout,\n'
          '        sTextureBindGroupLayout,\n'
          '        gfx::g_stereoBindGroupLayout, // @group(3): visionOS stereo eye offset\n'
          '    };\n'),
         # TEXGEN-SPLIT-ANSWER: shell toggle + probe flag externs (defined in DuskHostViewController.m)
         ('#include "gx_fmt.hpp"\n',
          '#include "gx_fmt.hpp"\n'
+         '#include "../gfx/frame.hpp" // gfx::current_frame (dusk stereo histogram)\n'
          '\n'
          '// dusk stereo (TEXGEN-SPLIT-ANSWER \xa71): shell toggle -- 0 (default) = only ViewProjmap-\n'
          '// tagged chains get the txs texcoord shift ("Texture depth" acts on the water alone);\n'
@@ -301,10 +326,12 @@ EDITS = {
     ],
     "lib/gx/pipeline.cpp": [
         # NEAR-DOUBLING §5: extern mode selector for pinning a transparency class to the panel.
-        ('namespace aurora::gx {\n'
-         'static Module Log("aurora::gx");\n',
+        ('#include <tracy/Tracy.hpp>\n'
+         '\n'
+         'namespace aurora::gx {\n',
+         '#include <tracy/Tracy.hpp>\n'
+         '\n'
          'namespace aurora::gx {\n'
-         'static Module Log("aurora::gx");\n'
          '// NEAR-DOUBLING \xa75: shell selector -- which transparency class to pin to the panel (so the\n'
          '// doubling sprites render single). 0=off 1=glows(additive+noZ) 2=no-Z-write 3=transparent\n'
          '// (blend or alpha-test) 4=alpha-tested. Defined in DuskHostViewController.m.\n'
@@ -341,10 +368,10 @@ EDITS = {
          '  pass.SetBindGroup(3, gfx::g_stereoBindGroups[stereoIdx]);\n'),
     ],
     "lib/gx/pipeline.hpp": [
-        ('  GXBindGroups bindGroups;\n'
+        ('  uint32_t instanceCount;\n'
          '  uint32_t dstAlpha;\n'
          '};\n',
-         '  GXBindGroups bindGroups;\n'
+         '  uint32_t instanceCount;\n'
          '  uint32_t dstAlpha;\n'
          '  // visionOS stereo (NEAR-DOUBLING \xa75): the draw\'s transparency class, so render() can pin\n'
          '  // the doubling sprite class (butterflies/flowers/sparkles) to the panel. Which bits count\n'
@@ -353,91 +380,107 @@ EDITS = {
          '  uint8_t stereoClass = 0;\n'
          '};\n'),
     ],
-    "lib/gx/command_processor.cpp": [
+    "lib/gx/regs.cpp": [
         # TEXGEN-SPLIT-ANSWER §1: parse the 0x5F8 texgen-class tag (before the PT-matrix branch).
-        ('  } else if (addr >= 0x500 && addr < 0x5F0) {\n',
-         '  } else if (addr == 0x5F8) {\n'
+        # (2026-10: XF memory writes moved from command_processor.cpp to regs.cpp copy_xf_data.)
+        ('  if (addr >= 0x500 && addr < 0x5F0) {\n'
+         '    // Post-transform texture matrices (0x500-0x5EF)\n',
+         '  if (addr == 0x5F8) {\n'
          '    // dusk stereo (TEXGEN-SPLIT-ANSWER \xa71): texgen-class tag, emitted adjacent to its\n'
          '    // matrix load by duskTagTexMtxClass / the J3D GD hooks (patch 0037), so parse-time\n'
          '    // ordering is exact by construction. payload = (GX texmtx id << 8) | J3DTexMtxMode.\n'
          '    CHECK(len == 1, "XF: texgen-class tag bad len {}", len);\n'
-         '    const u32 payload = read_u32(data, bigEndian);\n'
+         '    const u32 payload = read_bits<u32>(data, e);\n'
          '    const u32 id = payload >> 8;\n'
-         '    const u32 cls = payload & 0xFFu;\n'
+         '    const u8 cls = static_cast<u8>(payload & 0xFFu);\n'
+         '    u8* slot = nullptr;\n'
          '    if (id >= GX_PTTEXMTX0) {\n'
          '      const u32 idx = (id - static_cast<u32>(GX_PTTEXMTX0)) / 3;\n'
          '      if (idx < MaxPTTexMtx) {\n'
-         '        g_gxState.ptTexMtxClass[idx] = static_cast<u8>(cls);\n'
+         '        slot = &g_gxState.ptTexMtxClass[idx];\n'
          '      }\n'
          '    } else if (id >= GX_TEXMTX0) {\n'
          '      const u32 idx = (id - static_cast<u32>(GX_TEXMTX0)) / 3;\n'
          '      if (idx < MaxTexMtx) {\n'
-         '        g_gxState.texMtxClass[idx] = static_cast<u8>(cls);\n'
+         '        slot = &g_gxState.texMtxClass[idx];\n'
          '      }\n'
          '    }\n'
-         '    g_gxState.stateDirty = true;\n'
+         '    // The class feeds the pipeline config snapshot (tcg._p2), so a change must\n'
+         '    // re-snapshot the pipeline.\n'
+         '    if (slot != nullptr && *slot != cls) {\n'
+         '      *slot = cls;\n'
+         '      g_gxState.dirty |= DirtyPipeline;\n'
+         '    }\n'
          '    return true;\n'
-         '  } else if (addr >= 0x500 && addr < 0x5F0) {\n'),
+         '  }\n'
+         '  if (addr >= 0x500 && addr < 0x5F0) {\n'
+         '    // Post-transform texture matrices (0x500-0x5EF)\n'),
         # reset a REGULAR texmtx slot's class on any untagged write (tag re-arms right after)
-        ('    // Determine if 2x4 or 3x4 from count\n'
-         '    auto& mtx = g_gxState.texMtxs[mtxIdx];\n'
-         '    f32* flat = reinterpret_cast<f32*>(&mtx);\n'
+        ('    f32* flat = reinterpret_cast<f32*>(&g_gxState.texMtxs[mtxIdx]);\n'
+         '    bool changed = false;\n'
          '    for (u32 i = 0; i < len; i++) {\n'
-         '      flat[i] = read_f32(data + i * 4, bigEndian);\n'
+         '      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));\n'
          '    }\n',
-         '    // Determine if 2x4 or 3x4 from count\n'
-         '    auto& mtx = g_gxState.texMtxs[mtxIdx];\n'
-         '    f32* flat = reinterpret_cast<f32*>(&mtx);\n'
+         '    f32* flat = reinterpret_cast<f32*>(&g_gxState.texMtxs[mtxIdx]);\n'
+         '    bool changed = false;\n'
          '    for (u32 i = 0; i < len; i++) {\n'
-         '      flat[i] = read_f32(data + i * 4, bigEndian);\n'
+         '      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));\n'
          '    }\n'
          '    // dusk stereo: an untagged load means "not J3D-classified" -- back to unknown/glued.\n'
-         '    g_gxState.texMtxClass[mtxIdx] = 0;\n'),
+         '    if (g_gxState.texMtxClass[mtxIdx] != 0) {\n'
+         '      g_gxState.texMtxClass[mtxIdx] = 0;\n'
+         '      g_gxState.dirty |= DirtyPipeline;\n'
+         '    }\n'),
         # reset a PT texmtx slot's class likewise
-        ('    auto& mtx = g_gxState.ptTexMtxs[mtxIdx];\n'
-         '    f32* flat = reinterpret_cast<f32*>(&mtx);\n'
+        ('    f32* flat = reinterpret_cast<f32*>(&g_gxState.ptTexMtxs[mtxIdx]);\n'
+         '    bool changed = false;\n'
          '    for (u32 i = 0; i < len; i++) {\n'
-         '      flat[startOffset + i] = read_f32(data + i * 4, bigEndian);\n'
+         '      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));\n'
          '    }\n',
-         '    auto& mtx = g_gxState.ptTexMtxs[mtxIdx];\n'
-         '    f32* flat = reinterpret_cast<f32*>(&mtx);\n'
+         '    f32* flat = reinterpret_cast<f32*>(&g_gxState.ptTexMtxs[mtxIdx]);\n'
+         '    bool changed = false;\n'
          '    for (u32 i = 0; i < len; i++) {\n'
-         '      flat[startOffset + i] = read_f32(data + i * 4, bigEndian);\n'
+         '      changed |= store_xf_f32(flat[i], read_bits<u32>(data + i * 4, e));\n'
          '    }\n'
          '    // dusk stereo: an untagged load means "not J3D-classified" -- back to unknown/glued.\n'
-         '    g_gxState.ptTexMtxClass[mtxIdx] = 0;\n'),
+         '    if (g_gxState.ptTexMtxClass[mtxIdx] != 0) {\n'
+         '      g_gxState.ptTexMtxClass[mtxIdx] = 0;\n'
+         '      g_gxState.dirty |= DirtyPipeline;\n'
+         '    }\n'),
+    ],
+    "lib/gx/command_processor.cpp": [
         ('      .instanceCount = instanceCount,\n'
-         '      .bindGroups = bindGroups,\n'
-         '      .dstAlpha = g_gxState.dstAlpha,\n'
+         '      .dstAlpha = state.dstAlpha,\n'
          '  });\n',
          '      .instanceCount = instanceCount,\n'
-         '      .bindGroups = bindGroups,\n'
-         '      .dstAlpha = g_gxState.dstAlpha,\n'
+         '      .dstAlpha = state.dstAlpha,\n'
          '      // NEAR-DOUBLING \xa75: the draw\'s transparency class (blend / additive / no-Z / alpha-test)\n'
          '      // -- render() flattens whichever class the Flat-mode picks, to find the sprite class.\n'
          '      .stereoClass = static_cast<uint8_t>(\n'
-         '          (g_gxState.blendMode == GX_BM_BLEND ? 1u : 0u) |\n'
-         '          (g_gxState.blendFacDst == GX_BL_ONE ? 2u : 0u) |\n'
-         '          (!g_gxState.depthUpdate ? 4u : 0u) |\n'
-         '          ((g_gxState.alphaCompare.comp0 != GX_ALWAYS || g_gxState.alphaCompare.comp1 != GX_ALWAYS) ? 8u\n'
-         '                                                                                                     : 0u)),\n'
+         '          (state.blendMode == GX_BM_BLEND ? 1u : 0u) |\n'
+         '          (state.blendFacDst == GX_BL_ONE ? 2u : 0u) |\n'
+         '          (!state.depthUpdate ? 4u : 0u) |\n'
+         '          ((state.alphaCompare.comp0 != GX_ALWAYS || state.alphaCompare.comp1 != GX_ALWAYS) ? 8u : 0u)),\n'
          '  });\n'),
     ],
-    "lib/gfx/common.hpp": [
-        ('extern wgpu::BindGroupLayout g_uniformBindGroupLayout;\n'
-         'extern wgpu::BindGroup g_uniformBindGroup;\n',
-         'extern wgpu::BindGroupLayout g_uniformBindGroupLayout;\n'
-         'extern wgpu::BindGroup g_uniformBindGroup;\n'
+    "lib/gfx/resources.hpp": [
+        ('#include "types.hpp"\n',
+         '#include "types.hpp"\n'
+         '\n'
+         '#include <array>\n'),
+        # (2026-10: the bind-group globals moved from common.hpp into detail::Resources; the
+        # stereo externs + controls live here, next to them, at aurora::gfx scope.)
+        ('Resources& resources() noexcept;\n'
+         '} // namespace detail\n',
+         'Resources& resources() noexcept;\n'
+         '} // namespace detail\n'
+         '\n'
          '// visionOS stereo 3D (STEREO-3D-RECOVERY-FABLE): a tiny per-execution uniform at\n'
          '// @group(3) holding the eye offset. Index 0=OFF(e=0)/1=LEFT/2=RIGHT; g_stereoEye is\n'
          '// set on the render worker only (begin/end frame) and read by gx::render.\n'
          'extern wgpu::BindGroupLayout g_stereoBindGroupLayout;\n'
          'extern std::array<wgpu::BindGroup, 3> g_stereoBindGroups;\n'
-         'extern int g_stereoEye;\n'),
-        ('using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;\n',
-         '// eye: 0 for the sole/left composite, 1 for the right (stereo second execution).\n'
-         '// isLast: finalize (submit/present/pace) on this call -- true for the sole/last eye.\n'
-         'using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, int eye, bool isLast)>;\n'
+         'extern int g_stereoEye;\n'
          '\n'
          '// visionOS stereo 3D (STEREO-3D-RECOVERY-FABLE). When enabled, end_frame executes\n'
          '// the recorded frame packet TWICE (LEFT then RIGHT eye offset) and invokes the\n'
@@ -448,14 +491,25 @@ EDITS = {
          'void stereo_set_debug(bool on); // WATER-ANSWER \xa7D false-color probe (flags bit 0)\n'
          'void stereo_set_texamt(float amt); // WATER-ANSWER projected-texcoord shift strength (slot 4; 0=off)\n'),
     ],
-    "lib/gfx/common.cpp": [
-        # globals
-        ('wgpu::BindGroupLayout g_uniformBindGroupLayout;\n'
-         'wgpu::BindGroup g_uniformBindGroup;\n'
+    "lib/gfx/types.hpp": [
+        ('using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, std::vector<AfterSubmitCallback>)>;\n',
+         '// eye: 0 for the sole/left composite, 1 for the right (stereo second execution).\n'
+         '// isLast: finalize (submit/present/pace) on this call -- true for the sole/last eye; the\n'
+         '// frame\'s after-submit callbacks are handed to the last call only.\n'
+         'using EndFrameCallback =\n'
+         '    std::function<void(wgpu::CommandEncoder&, std::vector<AfterSubmitCallback>, int eye, bool isLast)>;\n'),
+    ],
+    "lib/gfx/frame.cpp": [
+        # encode_op (re-execution) lives in encoding.hpp since the gfx/common split
+        ('#include "depth_peek.hpp"\n',
+         '#include "depth_peek.hpp"\n'
+         '#include "encoding.hpp"\n'),
+        # globals (aurora::gfx scope, before the file's anonymous namespace: the bind-group
+        # layout / groups / eye are extern'd from resources.hpp)
+        ('using webgpu::g_queue;\n'
          '\n'
-         '// for imgui debug\n',
-         'wgpu::BindGroupLayout g_uniformBindGroupLayout;\n'
-         'wgpu::BindGroup g_uniformBindGroup;\n'
+         'namespace {\n',
+         'using webgpu::g_queue;\n'
          '\n'
          '// visionOS stereo 3D: @group(3) eye-offset uniform (0=OFF,1=LEFT,2=RIGHT).\n'
          'wgpu::BindGroupLayout g_stereoBindGroupLayout;\n'
@@ -471,13 +525,13 @@ EDITS = {
          'static std::atomic<float> g_stereoKNear{1.f};      // near-disparity knee (slot 5; V-doubling clamp, Near-depth slider)\n'
          'static std::atomic<float> g_stereoKGradC{0.f};     // softplus dz-floor s=kGrad*C (slot 6; slope-step smoothing)\n'
          '\n'
-         '// for imgui debug\n'),
+         'namespace {\n'),
         # creation block
-        ('    g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);\n'
+        ('    g_resources.uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);\n'
          '  }\n'
          '\n'
          '  gx::initialize();\n',
-         '    g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);\n'
+         '    g_resources.uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);\n'
          '  }\n'
          '  {\n'
          '    // visionOS stereo: @group(3) eye-offset uniform. Three buffers (OFF/LEFT/RIGHT),\n'
@@ -551,30 +605,30 @@ EDITS = {
          '    }\n'
          '  });\n'
          '  g_cpuFrameStart = PresentClock::now();\n'),
-        # end_frame: drop the early packet reset
-        ('    auto encoder = std::move(packet.encoder);\n'
-         '    const auto stats = packet.stats;\n'
-         '    packet = {};\n'
-         '    g_stats.drawCallCount = stats.drawCallCount;\n',
-         '    auto encoder = std::move(packet.encoder);\n'
-         '    const auto stats = packet.stats;\n'
-         '    g_stats.drawCallCount = stats.drawCallCount;\n'),
+        # end_frame: drop the early packet reset (the RIGHT-eye re-execution reads packet.ops)
+        ('    auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);\n'
+         '    packet = {};\n',
+         '    auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);\n'),
         # end_frame: the two-eye callback + packet re-execution
-        ('    g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;\n'
+        ('    g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;\n'
          '    if (callback) {\n'
-         '      callback(encoder);\n'
+         '      callback(encoder, std::move(afterSubmitCallbacks));\n'
          '    }\n'
          '    g_frameSlots.release(frameSlot);\n',
-         '    g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;\n'
+         '    g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;\n'
          '    // The LEFT eye was rendered incrementally into `encoder` (g_stereoEye==1, or OFF).\n'
          '    // Composite it (eye 0). Then in stereo, RE-EXECUTE the whole recorded packet with\n'
          '    // the RIGHT eye offset and composite that (eye 1). packet.ops carries every pass in\n'
          '    // encode order, so this renders the complete frame a second time -- no fifo replay,\n'
          '    // no drain interception. Ordering in the command stream: LEFT frame -> eye0 resample\n'
          '    // -> RIGHT frame (overwrites the shared targets) -> eye1 resample.\n'
+         '    // The frame\'s after-submit callbacks go to the LAST call only (the one that submits).\n'
+         '    // Encoder tasks re-run by the RIGHT execution append duplicates to the moved-from\n'
+         '    // packet.afterSubmitCallbacks; `packet = {}` below drops them, so each runs once.\n'
          '    const bool stereo = g_stereoEnabled.load();\n'
          '    if (callback) {\n'
-         '      callback(encoder, 0, /*isLast=*/!stereo);\n'
+         '      callback(encoder, stereo ? std::vector<AfterSubmitCallback>{} : std::move(afterSubmitCallbacks), 0,\n'
+         '               /*isLast=*/!stereo);\n'
          '    }\n'
          '    if (stereo) {\n'
          '      g_stereoEye = 2; // RIGHT\n'
@@ -583,7 +637,7 @@ EDITS = {
          '      }\n'
          '      g_stereoEye = 1; // restore LEFT for the next frame\'s incremental encode\n'
          '      if (callback) {\n'
-         '        callback(encoder, 1, /*isLast=*/true);\n'
+         '        callback(encoder, std::move(afterSubmitCallbacks), 1, /*isLast=*/true);\n'
          '      }\n'
          '    }\n'
          '    packet = {};\n'

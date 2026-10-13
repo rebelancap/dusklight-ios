@@ -23,6 +23,13 @@ Documents like iOS:
    0004 has just pinned to Documents. Same reasoning as iOS now applies, so it
    must report 0 too.
 
+2026-10 sync: upstream moved the folder capabilities into extern/borealis
+(borealis::data::Manager::capabilities()). DUSK_CAN_OPEN_DATA_FOLDER still exists
+in data.hpp (edit 1, unchanged), and borealis now has its OWN copy of the same
+gate for Environment::canOpenFolder (edit 2, new anchor, same fix).
+DUSK_CAN_CHANGE_DATA_FOLDER is gone upstream; its replacement,
+canChangeLocation = !isIOS, is fixed by patch 0004's isIOS gate.
+
 Both are the same bug class as patches 0002/0003/0004; see DECISIONS D-009 for
 the table. Desktop, iOS, tvOS and Android behavior are unchanged: the added
 terms only ever evaluate differently when TARGET_OS_VISION is 1.
@@ -30,50 +37,62 @@ terms only ever evaluate differently when TARGET_OS_VISION is 1.
 import subprocess, pathlib, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-REL = "src/dusk/data.hpp"
-SRC = ROOT / "vendor/dusklight" / REL
+VENDOR = ROOT / "vendor/dusklight"
 
-orig = SRC.read_text()
-text = orig
+OUT = '0005-dusk-visionos-data-folder-semantics.patch'
 
 EDITS = [
-    # 1. visionOS cannot reveal a folder in a file manager -> not a "desktop".
-    (
-        '#if defined(_WIN32) ||                                                                             \\\n'
-        '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST) ||           \\\n'
-        '    (defined(__linux__) && !defined(__ANDROID__))\n'
-        '#define DUSK_CAN_OPEN_DATA_FOLDER 1\n',
+    ("src/dusk/data.hpp", [
+        # 1. visionOS cannot reveal a folder in a file manager -> not a "desktop".
+        (
+            '#if defined(_WIN32) ||                                                                             \\\n'
+            '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST) ||           \\\n'
+            '    (defined(__linux__) && !defined(__ANDROID__))\n'
+            '#define DUSK_CAN_OPEN_DATA_FOLDER 1\n',
 
-        '#if defined(_WIN32) ||                                                                             \\\n'
-        '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST &&            \\\n'
-        '     !TARGET_OS_VISION) ||                                                                         \\\n'
-        '    (defined(__linux__) && !defined(__ANDROID__))\n'
-        '#define DUSK_CAN_OPEN_DATA_FOLDER 1\n',
-        1,
-    ),
-    # 2. visionOS's data folder is pinned to Documents (patch 0004), as on iOS.
-    (
-        '#if (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)\n'
-        '#define DUSK_CAN_CHANGE_DATA_FOLDER 0\n',
+            '#if defined(_WIN32) ||                                                                             \\\n'
+            '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST &&            \\\n'
+            '     !TARGET_OS_VISION) ||                                                                         \\\n'
+            '    (defined(__linux__) && !defined(__ANDROID__))\n'
+            '#define DUSK_CAN_OPEN_DATA_FOLDER 1\n',
+            1,
+        ),
+    ]),
+    ("extern/borealis/src/data.cpp", [
+        # 2. Same gate, borealis's own copy (drives capabilities().canOpenFolder).
+        (
+            '#if defined(_WIN32) ||                                                                             \\\n'
+            '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST) ||           \\\n'
+            '    (defined(__linux__) && !defined(__ANDROID__))\n'
+            '    environment.canOpenFolder = true;\n',
 
-        '#if (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_MACCATALYST)\n'
-        '#define DUSK_CAN_CHANGE_DATA_FOLDER 0\n',
-        1,
-    ),
+            '#if defined(_WIN32) ||                                                                             \\\n'
+            '    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST &&            \\\n'
+            '     !TARGET_OS_VISION) ||                                                                         \\\n'
+            '    (defined(__linux__) && !defined(__ANDROID__))\n'
+            '    environment.canOpenFolder = true;\n',
+            1,
+        ),
+    ]),
 ]
 
-for old, new, want in EDITS:
-    n = text.count(old)
-    assert n == want, f"expected {want} match(es), got {n} for:\n{old[:160]!r}"
-    text = text.replace(old, new)
+chunks = []
+for rel, edits in EDITS:
+    src = VENDOR / rel
+    orig = src.read_text()
+    text = orig
+    for old, new, want in edits:
+        n = text.count(old)
+        assert n == want, f"{rel}: expected {want} match(es), got {n} for:\n{old[:160]!r}"
+        text = text.replace(old, new)
+    with tempfile.NamedTemporaryFile("w", suffix=".a", delete=False) as fa, \
+         tempfile.NamedTemporaryFile("w", suffix=".b", delete=False) as fb:
+        fa.write(orig); fb.write(text); fa.flush(); fb.flush()
+        r = subprocess.run(["diff", "-u", "--label", f"a/{rel}", "--label", f"b/{rel}",
+                            fa.name, fb.name], capture_output=True)
+    assert r.returncode == 1, f"{rel}: diff produced no change"
+    chunks.append(r.stdout.decode())
 
-with tempfile.NamedTemporaryFile("w", suffix=".a", delete=False) as fa, \
-     tempfile.NamedTemporaryFile("w", suffix=".b", delete=False) as fb:
-    fa.write(orig); fb.write(text); fa.flush(); fb.flush()
-    r = subprocess.run(["diff", "-u", "--label", f"a/{REL}", "--label", f"b/{REL}",
-                        fa.name, fb.name], capture_output=True)
-assert r.returncode == 1
-
-out = ROOT / "overlay/patches/0005-dusk-visionos-data-folder-semantics.patch"
-out.write_text(__doc__ + "\n" + r.stdout.decode())
-print(f"wrote {out}")
+out = ROOT / "overlay/patches/" / OUT
+out.write_text(__doc__ + "\n" + "".join(chunks))
+print(f"wrote {out} ({len(chunks)} file(s))")

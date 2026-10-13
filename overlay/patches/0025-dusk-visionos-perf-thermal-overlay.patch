@@ -9,32 +9,33 @@ the follow-on; wall frame time + thermal already show pacing vs throttling.
 The overlay is toggled by `game.enableFpsOverlay` (defaulted ON for visionOS by
 patch 0011) and positioned by `game.fpsOverlayCorner`, both already wired.
 
+2026-10 sync: overlay.cpp now includes TargetConditionals itself, so hunk 1
+only adds the thermal decl (before namespace dusk::ui); the label is now set via
+set_text_content() instead of SetInnerRML(escape(...)). Same text, same gating.
+
 --- a/src/dusk/ui/overlay.cpp
 +++ b/src/dusk/ui/overlay.cpp
-@@ -1,5 +1,12 @@
- #include "overlay.hpp"
- 
-+#ifdef __APPLE__
-+#include <TargetConditionals.h>
-+#endif
+@@ -26,6 +26,9 @@
+ #if defined(__APPLE__)
+ #include <TargetConditionals.h>
+ #endif
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +extern "C" const char* aurora_get_thermal_state();
 +#endif
-+
- #include "aurora/lib/logging.hpp"
- #include "controller_config.hpp"
- #include "dusk/achievements.h"
-@@ -278,7 +285,13 @@
+ 
+ namespace dusk::ui {
+ namespace {
+@@ -303,7 +306,13 @@
                  static_cast<double>(now - mFpsLastUpdate) >= 0.5 * static_cast<double>(perfFreq);
              if (refreshLabel) {
                  mFpsLastUpdate = now;
--                mFpsCounter->SetInnerRML(escape(fmt::format("{:.0f} FPS", fps)));
+-                set_text_content(mFpsCounter, fmt::format("{:.0f} FPS", fps));
 +                const float frameMs = fps > 0.f ? 1000.f / fps : 0.f;
 +#if defined(__APPLE__) && TARGET_OS_VISION
-+                mFpsCounter->SetInnerRML(escape(fmt::format(
-+                    "{:.0f} FPS  {:.1f} ms  {}", fps, frameMs, aurora_get_thermal_state())));
++                set_text_content(mFpsCounter, fmt::format("{:.0f} FPS  {:.1f} ms  {}", fps, frameMs,
++                                                          aurora_get_thermal_state()));
 +#else
-+                mFpsCounter->SetInnerRML(escape(fmt::format("{:.0f} FPS  {:.1f} ms", fps, frameMs)));
++                set_text_content(mFpsCounter, fmt::format("{:.0f} FPS  {:.1f} ms", fps, frameMs));
 +#endif
              }
          } else {

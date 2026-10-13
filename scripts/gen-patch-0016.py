@@ -37,6 +37,11 @@ standalone under ASan/UBSan (4096->2048, odd dims, averaging, no-op, no OOB).
 
 visionOS-gated; every other platform untouched. Compressed + non-32-bpp formats
 fall through unchanged.
+
+2026-10 sync: aurora moved this file into namespace aurora::texture, so the
+helper anchor now reads gfx::ConvertedTexture (the helper's fully-qualified
+aurora::gfx:: names still resolve). ConvertedTexture gained hasArbitraryMips;
+the clamp now clears it alongside mips = 1, since it drops the mip chain.
 """
 import subprocess, pathlib, tempfile
 
@@ -49,7 +54,7 @@ text = orig
 
 # --- hunk 1: the downscale helper, before load_encoded_replacement -----------
 helper_anchor = ('template <typename Source>\n'
-                 'std::optional<aurora::gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noexcept {\n')
+                 'std::optional<gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noexcept {\n')
 helper = (
     '#if defined(__APPLE__) && TARGET_OS_VISION\n'
     '// A 4K RGBA8 replacement is ~64MB (+mips); a pack full of them exhausts the\n'
@@ -117,6 +122,7 @@ helper = (
     '  tex.width = w;\n'
     '  tex.height = h;\n'
     '  tex.mips = 1;\n'
+    '  tex.hasArbitraryMips = false; // mip chain dropped above\n'
     '  static bool loggedOnce = false;\n'
     '  if (!loggedOnce) {\n'
     '    loggedOnce = true;\n'

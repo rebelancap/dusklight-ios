@@ -14,6 +14,9 @@ independently; wall frame time + thermal already separate throttling from pacing
 
 visionOS-gated; in aurora::update() (runs every frame). SDL_GetTicks for a
 wall-clock 5 s cadence independent of fps.
+
+2026-10 sync: update() gained an AURORA_ENABLE_GX gx::update() call; the soak
+block still sits right before poll_events().
 """
 import subprocess, pathlib, tempfile
 
@@ -48,6 +51,9 @@ upd_old = ('const AuroraEvent* update() noexcept {\n'
            '    g_initialFrame = false;\n'
            '    input::initialize();\n'
            '  }\n'
+           '#ifdef AURORA_ENABLE_GX\n'
+           '  gx::update();\n'
+           '#endif\n'
            '  return window::poll_events();\n'
            '}\n')
 upd_new = ('const AuroraEvent* update() noexcept {\n'
@@ -56,6 +62,9 @@ upd_new = ('const AuroraEvent* update() noexcept {\n'
            '    g_initialFrame = false;\n'
            '    input::initialize();\n'
            '  }\n'
+           '#ifdef AURORA_ENABLE_GX\n'
+           '  gx::update();\n'
+           '#endif\n'
            '#if defined(__APPLE__) && TARGET_OS_VISION\n'
            '  {\n'
            '    // Soak trace: log the perf/thermal/memory picture every 5 s so a play\n'

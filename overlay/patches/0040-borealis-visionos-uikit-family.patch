@@ -1,0 +1,147 @@
+Overlay patch 0040: build borealis for visionOS as the UIKit-family platform it is.
+
+New with the 2026-10 upstream sync. Upstream moved the app-platform layer (data
+folders, file IO, file-select dialogs, Discord, HTTP, logging, crash handler) out of
+dusklight into the extern/borealis submodule, and borealis dispatches on iOS with
+both idioms this port keeps tripping over (DECISIONS D-009):
+
+  CMake  `IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS"` -- ios.toolchain.cmake sets IOS=OFF
+         and CMAKE_SYSTEM_NAME=visionOS for PLATFORM=(SIMULATOR_)VISIONOS, so
+         visionOS compiled NEITHER the Apple IO backend (io_apple.mm: security-scoped
+         bookmarks + the Documents/imported store) NOR the UIKit document picker
+         (file_select/ios.mm + ios_import.mm).
+  C++    `TARGET_OS_IOS` -- 0 on visionOS, so io.cpp compiled the desktop stubs
+         ("Bookmarks are not supported on this platform") and the no-op
+         release_access().
+
+Together that would leave visionOS with no file picker and no way to reopen a
+picked disc: upstream's own fix for the Inbox-purge re-prompt (it now keeps a
+security-scoped bookmark, or imports into Documents/imported) is exactly the
+io_apple.mm path. It is what retired patch 0028.
+
+Fix, visionOS-only (every other platform evaluates identically):
+  1. CMakeLists.txt: compile io_apple.mm and the UIKit picker sources (and link
+     Foundation / UIKit / UniformTypeIdentifiers) for CMAKE_SYSTEM_NAME visionOS too.
+  2. CMakeLists.txt: Discord defaults OFF on visionOS and is rejected there, as on
+     iOS/tvOS (the SDK ships no xros slice -- same reasoning as patch 0001 had for
+     dusk's old DUSK_ENABLE_DISCORD).
+  3. src/io.cpp: the seven `TARGET_OS_IOS` bookmark gates (and the inverse gate on
+     the release_access stub) also accept TARGET_OS_VISION.
+
+The picker's #define gate (file_select.cpp) is patch 0003 and the data-folder
+gates (data.cpp) are patches 0004/0005 -- same bug class, kept in their original
+slots. TARGET_OS_VISION needs no guard: TargetConditionals.h is included under
+__APPLE__ in io.cpp and an undefined identifier is 0 inside #if.
+
+--- a/extern/borealis/CMakeLists.txt
++++ b/extern/borealis/CMakeLists.txt
+@@ -21,7 +21,7 @@
+ option(BOREALIS_ENABLE_DISC "Build borealis::disc (requires borealis::io, nod, and xxhash)" ON)
+ option(BOREALIS_ENABLE_SENTRY "Build borealis::sentry with sentry-native/crashpad" OFF)
+ set(_borealis_discord_default ON)
+-if (ANDROID OR IOS OR TVOS OR CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
++if (ANDROID OR IOS OR TVOS OR CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS|visionOS)$")
+     set(_borealis_discord_default OFF)
+ endif ()
+ option(BOREALIS_ENABLE_DISCORD "Build borealis::discord" ${_borealis_discord_default})
+@@ -258,7 +258,7 @@
+     add_library(borealis_io STATIC src/io.cpp)
+     add_library(borealis::io ALIAS borealis_io)
+     target_link_libraries(borealis_io PUBLIC borealis_core PRIVATE borealis_sdl_dep)
+-    if (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    if (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+         find_library(BOREALIS_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+         target_sources(borealis_io PRIVATE src/io_apple.mm)
+         set_source_files_properties(src/io_apple.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+@@ -354,7 +354,7 @@
+         target_sources(borealis_file_select PRIVATE src/file_select/macos.mm)
+         set_source_files_properties(src/file_select/macos.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+         target_link_libraries(borealis_file_select PRIVATE ${BOREALIS_APPKIT_FRAMEWORK})
+-    elseif (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    elseif (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+         find_library(BOREALIS_UIKIT_FRAMEWORK UIKit REQUIRED)
+         find_library(BOREALIS_UNIFORM_TYPE_IDENTIFIERS_FRAMEWORK
+                 UniformTypeIdentifiers REQUIRED)
+@@ -372,7 +372,7 @@
+ 
+ if (BOREALIS_ENABLE_DISCORD)
+     set(_borealis_json_needed ON)
+-    if (ANDROID OR IOS OR TVOS OR CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
++    if (ANDROID OR IOS OR TVOS OR CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS|visionOS)$")
+         message(FATAL_ERROR "borealis::discord is not supported on this platform")
+     endif ()
+     find_package(Threads REQUIRED)
+--- a/extern/borealis/src/io.cpp
++++ b/extern/borealis/src/io.cpp
+@@ -108,7 +108,7 @@
+         separator == std::string_view::npos ? location : location.substr(separator + 1)};
+ }
+ 
+-#if !defined(__APPLE__) || !TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_MACCATALYST
++#if !defined(__APPLE__) || !(TARGET_OS_IOS || TARGET_OS_VISION) || TARGET_OS_TV || TARGET_OS_MACCATALYST
+ void release_access(void*) noexcept {}
+ #endif
+ 
+@@ -384,7 +384,7 @@
+     std::string resolved{location};
+     void* access = nullptr;
+     if (detail::is_apple_location(location)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         auto bookmark = detail::resolve_apple_location(location, true);
+         if (bookmark.status != Status::Ok) {
+             return failed_open(bookmark.status, std::move(bookmark.message));
+@@ -437,7 +437,7 @@
+ 
+ Status check(std::string_view location) {
+     if (detail::is_apple_location(location)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         return detail::apple_location_check(location);
+ #else
+         return Status::Unsupported;
+@@ -456,7 +456,7 @@
+ 
+ std::string display_name(std::string_view location) {
+     if (detail::is_apple_location(location)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         return detail::apple_location_display_name(location);
+ #else
+         return {};
+@@ -478,7 +478,7 @@
+         return {.status = Status::Failed, .message = "Child path must be a safe relative path"};
+     }
+     if (detail::is_apple_location(folder)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         return detail::apple_location_join(folder, relativePath);
+ #else
+         return {.status = Status::Unsupported, .message = "Bookmarks are not supported"};
+@@ -517,7 +517,7 @@
+     }
+ 
+     if (detail::is_apple_location(folder)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         return detail::apple_location_create_child(folder, name);
+ #else
+         return {.status = Status::Unsupported, .message = "Bookmarks are not supported"};
+@@ -557,7 +557,7 @@
+ 
+ ListResult list(std::string_view folder) {
+     if (detail::is_apple_location(folder)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         return detail::apple_location_list(folder);
+ #else
+         return {.status = Status::Unsupported, .message = "Bookmarks are not supported"};
+@@ -628,7 +628,7 @@
+ 
+ PathAccess access_path(std::string_view location) {
+     if (detail::is_apple_location(location)) {
+-#if defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
++#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_TV && !TARGET_OS_MACCATALYST
+         auto resolved = detail::resolve_apple_location(location, true);
+         if (resolved.status == Status::Ok) {
+             return {fs_path_from_utf8(resolved.path), resolved.access};

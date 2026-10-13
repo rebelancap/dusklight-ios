@@ -36,9 +36,9 @@ visionOS-gated; every other platform keeps the 4 GB budget.
 
 --- a/extern/aurora/lib/gfx/texture_replacement.cpp
 +++ b/extern/aurora/lib/gfx/texture_replacement.cpp
-@@ -35,7 +35,17 @@
+@@ -42,7 +42,17 @@
  namespace {
- aurora::Module Log("aurora::texture");
+ constexpr Module Log{"aurora::texture"};
  
 +#if defined(__APPLE__)
 +#include <TargetConditionals.h>
@@ -51,6 +51,6 @@ visionOS-gated; every other platform keeps the 4 GB budget.
 +#else
  constexpr uint64_t kReplacementCacheBudgetBytes = 4294967296; // 4GB
 +#endif
- constexpr uint64_t kReplacementWildcardTextureHash = aurora::texture::kWildcardTextureHash;
- constexpr uint64_t kReplacementWildcardTlutHash = aurora::texture::kWildcardTlutHash;
+ constexpr uint64_t kReplacementWildcardTextureHash = kWildcardTextureHash;
+ constexpr uint64_t kReplacementWildcardTlutHash = kWildcardTlutHash;
  

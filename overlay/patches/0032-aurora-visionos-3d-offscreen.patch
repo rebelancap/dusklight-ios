@@ -26,9 +26,17 @@ DuskHostViewController.m and the pace fns in DuskImmersive.m. visionOS-gated;
 every other platform keeps the exact present path. This is the surface half of
 the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 
+2026-10 sync (aurora 1dde08fa -> 3227d76c): same 14 edits. The end-frame
+callback now also receives the frame's afterSubmitCallbacks
+(encoder, afterSubmitCallbacks) -- (eye, isLast) are appended after it, and the
+isLast early-return still precedes Finish/Submit/afterSubmit, so the encoder is
+finished and the after-submit callbacks run exactly once per frame (patch 0035
+hands the callbacks only to the last eye). The stats TracyPlot anchor now reads
+the local `stats` (gfx::g_stats moved into gfx::detail::resources()).
+
 --- a/extern/aurora/lib/aurora.cpp
 +++ b/extern/aurora/lib/aurora.cpp
-@@ -125,6 +125,9 @@
+@@ -132,6 +132,9 @@
      g_config.resourcesPath = strdup(g_config.resourcesPath);
    }
    if (g_config.msaa == 0) {
@@ -38,7 +46,7 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
      g_config.msaa = 1;
    }
    if (g_config.maxTextureAnisotropy == 0) {
-@@ -251,6 +254,39 @@
+@@ -266,6 +269,42 @@
  #endif
    return window::poll_events();
  }
@@ -64,6 +72,9 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 +extern "C" volatile float gDusk3DLinkPLCur;
 +extern "C" volatile float gDusk3DLinkPLEye;
 +extern "C" volatile float gDusk3DSep;
++// Scene-transition flag (dusk, patch 0036): non-zero during wipes/fades/loads, where
++// there is no stable depth -- the separation ramps to 0 across it (IRONJ item 2).
++extern "C" volatile int gDusk3DInTransition;
 +extern "C" volatile float gDusk3DFarDepth; // far-depth knee kFar (shell slider, 0.25-1.0)
 +extern "C" volatile float gDusk3DNearDepth; // near-depth knee kNear (shell slider; V-doubling clamp)
 +extern "C" volatile float gDusk3DKGrad;     // softplus dz-floor factor (shell slider; slope-step smoothing)
@@ -78,9 +89,9 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
  
  bool begin_frame() noexcept {
    ZoneScoped;
-@@ -284,6 +320,56 @@
- #ifdef AURORA_ENABLE_GX
-   gx::fifo::drain();
+@@ -302,6 +341,79 @@
+   gx::fifo::end_frame();
+   gx::texture::end_frame();
    gfx::finish();
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +  // visionOS 3D: render the frame for both eyes (packet re-execution in gfx::end_frame).
@@ -124,7 +135,30 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 +    if (!(kGrad >= 0.0f)) {
 +      kGrad = 0.0f;
 +    }
-+    gfx::stereo_set_params(depthFrac * C, 1.0f / C, kFar, kNear, kGrad * C);
++    // Scene-transition flatten (IRONJ item 2): a wipe/fade/load has no stable depth, so
++    // stereo across one reads as a smear. Ramp the separation to 0 over ~4 frames when a
++    // transition starts and back over ~10 when it ends -- never snap, a one-frame jump in
++    // separation is its own artifact. C keeps smoothing throughout so the convergence
++    // plane is already correct for the new scene when separation comes back.
++    static float s_transRamp = 1.0f;   // 1 = full separation, 0 = flat
++    static int s_transWasIn = 0;
++    static int s_transLogged = 0;
++    const bool inTransition = (gDusk3DInTransition != 0);
++    if (inTransition != (s_transWasIn != 0)) {
++      s_transWasIn = inTransition ? 1 : 0;
++      if (s_transLogged < 6) {
++        ++s_transLogged;
++        Log.info("dusk3d: scene transition {} (separation ramp {})", inTransition ? "START" : "END",
++                 s_transRamp);
++      }
++    }
++    {
++      const float target = inTransition ? 0.0f : 1.0f;
++      const float rate = inTransition ? (1.0f / 4.0f) : (1.0f / 10.0f);
++      s_transRamp += std::clamp(target - s_transRamp, -rate, rate);
++      s_transRamp = std::clamp(s_transRamp, 0.0f, 1.0f);
++    }
++    gfx::stereo_set_params(depthFrac * C * s_transRamp, 1.0f / C, kFar, kNear, kGrad * C);
 +    static int s_camLog = 0;
 +    if ((s_camLog++ % 120) == 0) {
 +      Log.info("dusk3d: camDistLA {} P0cur {} P0eye {} PLcur {} PLeye {} C {} kNear {}", camDistLA,
@@ -135,13 +169,13 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
    auto imguiDrawData = imgui::freeze();
  
    const auto& presentSource = webgpu::present_source();
-@@ -302,13 +388,20 @@
- #endif
+@@ -321,13 +433,20 @@
  
    gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
--                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
-+                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder, int eye,
-+                                                            bool isLast) {
+                   imguiDrawData = std::move(imguiDrawData)](
+-                     wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
++                     wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks,
++                     int eye, bool isLast) {
      wgpu::Texture currentTexture;
      wgpu::TextureView currentView;
      auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
@@ -158,7 +192,7 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
          ZoneScopedN("Acquire texture");
          wgpu::SurfaceTexture surfaceTexture;
          g_surface.GetCurrentTexture(&surfaceTexture);
-@@ -378,9 +471,20 @@
+@@ -397,9 +516,20 @@
          imgui::render(pass, imguiDrawData);
          pass.End();
        }
@@ -179,7 +213,7 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
      webgpu::gpu_prof::frame_end(encoder);
      const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
      const auto buffer = encoder.Finish(&cmdBufDescriptor);
-@@ -404,7 +508,7 @@
+@@ -423,7 +553,7 @@
          Log.warn("Surface present failed");
          webgpu::release_surface();
        }
@@ -188,10 +222,10 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
        switch (surfaceStatus) {
        case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
          Log.warn("Surface texture acquisition timed out");
-@@ -448,10 +552,159 @@
-     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
-     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
-     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
+@@ -473,10 +603,196 @@
+     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(stats.lastIndexSize));
+     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
+     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +    if (present3DSuppressed) {
 +      // Phase-lock to the compositor (guide 3.7): with no present to pace it the
@@ -207,7 +241,7 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
    });
  
  #endif
- }
++}
 +
 +#if defined(__APPLE__) && TARGET_OS_VISION
 +#include <IOSurface/IOSurfaceRef.h>
@@ -215,6 +249,13 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 +extern "C" volatile int gDusk3DEyeFrames[2];
 +extern "C" volatile int gDusk3DEyeW;
 +extern "C" volatile int gDusk3DEyeH;
++// Fenced hand-off (IRONJ item 1): the MTLSharedEvent Dawn signals when this eye's
++// render has actually completed, + the value it signals. Published (retained) here,
++// consumed by DuskImmersive.m via encodeWaitForEvent before it blits the IOSurface.
++// NULL event = no fence available (sim without SharedFenceMTLSharedEvent) -> the
++// shell keeps the old unfenced path.
++extern "C" void* volatile gDusk3DEyeReadyEvent[2];
++extern "C" volatile unsigned long long gDusk3DEyeReadyValue[2];
 +extern "C" volatile int gDusk3DEye = 0; // 0=OFF, 1=LEFT, 2=RIGHT (read by shader_info.cpp)
 +
 +wgpu::SharedTextureMemory s_dusk3dEyeStm[2];
@@ -222,6 +263,7 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 +uint32_t s_dusk3dEyeTexW[2] = {0, 0};
 +uint32_t s_dusk3dEyeTexH[2] = {0, 0};
 +bool s_dusk3dEyeInitialized[2] = {false, false};
++void* s_dusk3dEyeEvent[2] = {nullptr, nullptr}; // retained MTLSharedEvent per eye
 +
 +void dusk3d_eye_render(const wgpu::CommandEncoder& encoder, int eye) {
 +  if (eye < 0 || eye > 1) {
@@ -326,8 +368,37 @@ the 3D engine plumbing; M3 adds the eye-render-target half in the same region.
 +  wgpu::SharedTextureMemoryEndAccessState endState{};
 +  s_dusk3dEyeStm[eye].EndAccess(s_dusk3dEyeTex[eye], &endState);
 +  s_dusk3dEyeInitialized[eye] = true;
-+  gDusk3DEyeFrames[eye] = gDusk3DEyeFrames[eye] + 1; // publish (simple; race device-only §9.7)
-+}
++  // Fence the hand-off (IRONJ item 1; guide §9.7 #13). EndAccess hands back the fences
++  // that will be signalled when this eye's work completes; export the Metal one and
++  // publish it so the compositor loop can encodeWaitForEvent instead of trusting a bare
++  // frame counter (cross-queue tearing on device). Order matters: VALUE, then EVENT,
++  // then the counter the shell gates on -- a reader that sees the new count sees a
++  // complete pair. No fence (sim without SharedFenceMTLSharedEvent) => event stays NULL
++  // and the shell falls back to the unfenced blit, exactly as before.
++  if (endState.fenceCount > 0 && endState.fences != nullptr && endState.signaledValues != nullptr) {
++    wgpu::SharedFenceMTLSharedEventExportInfo mtlInfo{};
++    wgpu::SharedFenceExportInfo exportInfo{};
++    exportInfo.nextInChain = &mtlInfo;
++    endState.fences[0].ExportInfo(&exportInfo);
++    if (mtlInfo.sharedEvent != nullptr) {
++      gDusk3DEyeReadyValue[eye] = static_cast<unsigned long long>(endState.signaledValues[0]);
++      if (s_dusk3dEyeEvent[eye] != mtlInfo.sharedEvent) {
++        // Retain across the endState teardown (it owns the SharedFence, which owns the
++        // event); release the one we held. Dawn reuses one event per queue, so this runs
++        // once, not per frame.
++        void* prev = s_dusk3dEyeEvent[eye];
++        CFRetain(static_cast<CFTypeRef>(mtlInfo.sharedEvent));
++        s_dusk3dEyeEvent[eye] = mtlInfo.sharedEvent;
++        gDusk3DEyeReadyEvent[eye] = mtlInfo.sharedEvent;
++        if (prev != nullptr) {
++          CFRelease(static_cast<CFTypeRef>(prev));
++        }
++        Log.info("dusk3d: eye {} fenced (MTLSharedEvent)", eye);
++      }
++    }
++  }
++  gDusk3DEyeFrames[eye] = gDusk3DEyeFrames[eye] + 1; // publish (fenced above when exported)
+ }
 +
 +// M5: render-scale bridge for the shell's Sharpness slider. Cranks the game's
 +// internal render resolution (aurora's frame-buffer scale, a multiplier on the

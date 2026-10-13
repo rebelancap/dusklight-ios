@@ -24,7 +24,7 @@ one-line edits, clear of every other patch's hunks.
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -200,7 +200,9 @@
+@@ -175,7 +175,9 @@
      set(CMAKE_INSTALL_RPATH "$ORIGIN")
      set(CMAKE_BUILD_RPATH "$ORIGIN")
  elseif (APPLE)
@@ -32,10 +32,10 @@ one-line edits, clear of every other patch's hunks.
 +    add_compile_options(
 +        $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Wno-declaration-after-statement>
 +        $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Wno-non-pod-varargs>)
-     set(CMAKE_INSTALL_RPATH "$ORIGIN")
-     set(CMAKE_BUILD_RPATH "$ORIGIN")
- elseif (MSVC)
-@@ -308,7 +310,7 @@
+     set(CMAKE_INSTALL_RPATH "@loader_path")
+     set(CMAKE_BUILD_RPATH "@loader_path")
+ endif ()
+@@ -262,7 +264,7 @@
  # Use signed char on ARM to match the original game (and x86)
  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _arch)
  if(_arch MATCHES "^(arm|aarch64)" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
@@ -43,4 +43,4 @@ one-line edits, clear of every other patch's hunks.
 +    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fsigned-char>)
  endif()
  
- configure_version_header()
+ include(files.cmake)

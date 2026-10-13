@@ -35,7 +35,7 @@ is the artifact that settles the model.
 
 --- a/extern/aurora/lib/dawn/MetalBinding.mm
 +++ b/extern/aurora/lib/dawn/MetalBinding.mm
-@@ -34,3 +34,86 @@
+@@ -61,3 +61,86 @@
    return std::move(desc);
  }
  } // namespace aurora::webgpu::utils
@@ -134,7 +134,7 @@ is the artifact that settles the model.
  #ifdef AURORA_ENABLE_GX
  #include "imgui.hpp"
  #include "webgpu/gpu.hpp"
-@@ -226,6 +230,30 @@
+@@ -285,6 +289,30 @@
  const AuroraEvent* poll_events() {
    ZoneScoped;
    g_events.clear();
@@ -162,6 +162,6 @@ is the artifact that settles the model.
 +  }
 +  resize_swapchain();
 +#endif
+   g_eventStrings.clear();
  
    SDL_Event event;
-   // Clear out the previous scroll values to prevent ghost input

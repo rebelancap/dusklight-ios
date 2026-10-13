@@ -22,13 +22,20 @@ Documents like iOS:
    0004 has just pinned to Documents. Same reasoning as iOS now applies, so it
    must report 0 too.
 
+2026-10 sync: upstream moved the folder capabilities into extern/borealis
+(borealis::data::Manager::capabilities()). DUSK_CAN_OPEN_DATA_FOLDER still exists
+in data.hpp (edit 1, unchanged), and borealis now has its OWN copy of the same
+gate for Environment::canOpenFolder (edit 2, new anchor, same fix).
+DUSK_CAN_CHANGE_DATA_FOLDER is gone upstream; its replacement,
+canChangeLocation = !isIOS, is fixed by patch 0004's isIOS gate.
+
 Both are the same bug class as patches 0002/0003/0004; see DECISIONS D-009 for
 the table. Desktop, iOS, tvOS and Android behavior are unchanged: the added
 terms only ever evaluate differently when TARGET_OS_VISION is 1.
 
 --- a/src/dusk/data.hpp
 +++ b/src/dusk/data.hpp
-@@ -8,14 +8,15 @@
+@@ -10,7 +10,8 @@
  #endif
  
  #if defined(_WIN32) ||                                                                             \
@@ -38,11 +45,15 @@ terms only ever evaluate differently when TARGET_OS_VISION is 1.
      (defined(__linux__) && !defined(__ANDROID__))
  #define DUSK_CAN_OPEN_DATA_FOLDER 1
  #else
- #define DUSK_CAN_OPEN_DATA_FOLDER 0
+--- a/extern/borealis/src/data.cpp
++++ b/extern/borealis/src/data.cpp
+@@ -472,7 +472,8 @@
+     environment.isIOS = true;
  #endif
- 
--#if (defined(__APPLE__) && TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
-+#if (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_VISION) && !TARGET_OS_MACCATALYST)
- #define DUSK_CAN_CHANGE_DATA_FOLDER 0
- #else
- #define DUSK_CAN_CHANGE_DATA_FOLDER 1
+ #if defined(_WIN32) ||                                                                             \
+-    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST) ||           \
++    (defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_TV && !TARGET_OS_MACCATALYST &&            \
++     !TARGET_OS_VISION) ||                                                                         \
+     (defined(__linux__) && !defined(__ANDROID__))
+     environment.canOpenFolder = true;
+ #endif

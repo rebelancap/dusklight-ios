@@ -17,6 +17,9 @@ Pairs with 0018. Two things:
    Fires once. visionOS-gated.
 
 <string_view> and TARGET_OS_VISION are already included in this file.
+
+2026-10 sync: re-anchored on webgpu::g_device (namespace move). Upstream still
+passes label.c_str(), so the length fix is still needed.
 """
 import subprocess, pathlib, tempfile
 
@@ -35,7 +38,7 @@ tex_new = ('  const wgpu::TextureDescriptor textureDescriptor{\n'
 assert text.count(tex_old) == 1, f"tex label anchor: {text.count(tex_old)}"
 text = text.replace(tex_old, tex_new)
 
-create_old = '  auto texture = g_device.CreateTexture(&textureDescriptor);\n'
+create_old = '  auto texture = webgpu::g_device.CreateTexture(&textureDescriptor);\n'
 create_new = ('#if defined(__APPLE__) && TARGET_OS_VISION\n'
               '  static bool s_loggedFirstConverted = false;\n'
               '  if (!s_loggedFirstConverted) {\n'
@@ -45,7 +48,7 @@ create_new = ('#if defined(__APPLE__) && TARGET_OS_VISION\n'
               '             static_cast<uint32_t>(replacement.format), label, label.size());\n'
               '  }\n'
               '#endif\n'
-              '  auto texture = g_device.CreateTexture(&textureDescriptor);\n')
+              '  auto texture = webgpu::g_device.CreateTexture(&textureDescriptor);\n')
 assert text.count(create_old) == 1, f"create anchor: {text.count(create_old)}"
 text = text.replace(create_old, create_new)
 

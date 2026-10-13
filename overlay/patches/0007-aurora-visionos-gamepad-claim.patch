@@ -42,38 +42,48 @@ pad input to the gaze layer; it happily reports a virtual pad either way (the si
 logs `Added controller 'Gamepad' vid 05ac` with or without this patch). This
 lands so the first device OTA can verify it -- see MEASUREMENTS.
 
+2026-10 sync: aurora now creates the SDL Metal view once and caches it as a
+window property ("aurora.metal_view"), so the claim moved inside that one-time
+creation branch. Behaviour is identical: one interaction, on the CAMetalLayer view.
+
 --- a/extern/aurora/lib/dawn/MetalBinding.mm
 +++ b/extern/aurora/lib/dawn/MetalBinding.mm
-@@ -3,9 +3,32 @@
+@@ -2,6 +2,12 @@
+ 
  #import <Foundation/Foundation.h>
  #include <SDL3/SDL_metal.h>
- 
++
 +#include <TargetConditionals.h>
 +#if TARGET_OS_VISION
 +#import <GameController/GameController.h>
 +#import <UIKit/UIKit.h>
 +#endif
-+
+ #include <SDL3/SDL_properties.h>
+ 
  namespace aurora::webgpu::utils {
- std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL_Window* window) {
-   SDL_MetalView view = SDL_Metal_CreateView(window);
+@@ -27,6 +33,25 @@
+       }
+       return nullptr;
+     }
 +#if TARGET_OS_VISION
-+  // visionOS converts game-controller input into gaze-and-pinch UI events and
-+  // withholds it from GCController, so without this the pad drives the system
-+  // pointer and the game sees a dead controller. Apple's GCEventInteraction
-+  // docs say to attach the interaction to the view hosting the CAMetalLayer,
-+  // which is exactly this view. receivesEventsInView stays at its default NO,
-+  // so pad events arrive *exclusively* via GameController -- which is what
-+  // SDL3's Apple controller backend reads.
-+  if (@available(visionOS 2.0, *)) {
-+    UIView* metalView = (__bridge UIView*)view;
-+    if (metalView != nil) {
-+      GCEventInteraction* padClaim = [[GCEventInteraction alloc] init];
-+      padClaim.handledEventTypes = GCUIEventTypeGamepad;
-+      [metalView addInteraction:padClaim];
++    // visionOS converts game-controller input into gaze-and-pinch UI events and
++    // withholds it from GCController, so without this the pad drives the system
++    // pointer and the game sees a dead controller. Apple's GCEventInteraction
++    // docs say to attach the interaction to the view hosting the CAMetalLayer,
++    // which is exactly this view. receivesEventsInView stays at its default NO,
++    // so pad events arrive *exclusively* via GameController -- which is what
++    // SDL3's Apple controller backend reads.
++    // (2026-10: aurora now caches the view on the window, so this runs once,
++    // when the view is first created.)
++    if (@available(visionOS 2.0, *)) {
++      UIView* metalView = (__bridge UIView*)view;
++      if (metalView != nil) {
++        GCEventInteraction* padClaim = [[GCEventInteraction alloc] init];
++        padClaim.handledEventTypes = GCUIEventTypeGamepad;
++        [metalView addInteraction:padClaim];
++      }
 +    }
-+  }
 +#endif
+   }
    std::shared_ptr<wgpu::SurfaceSourceMetalLayer> desc = std::make_shared<wgpu::SurfaceSourceMetalLayer>();
    desc->layer = SDL_Metal_GetLayer(view);
-   return std::move(desc);

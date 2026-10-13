@@ -22,7 +22,7 @@ simply reports false there. No behavior change for iOS.
 
 --- a/extern/aurora/cmake/aurora_core.cmake
 +++ b/extern/aurora/cmake/aurora_core.cmake
-@@ -27,7 +27,7 @@
+@@ -39,7 +39,7 @@
      target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
  endif ()
  

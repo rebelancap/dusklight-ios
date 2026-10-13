@@ -14,7 +14,7 @@ patch touches the frame-buffer-scale code).
 
 --- a/extern/aurora/lib/window.cpp
 +++ b/extern/aurora/lib/window.cpp
-@@ -46,6 +46,10 @@
+@@ -49,6 +49,10 @@
  SDL_Renderer* g_renderer;
  float g_frameBufferScale = 0.f;
  bool g_frameBufferAspectFit = false;
@@ -24,8 +24,8 @@ patch touches the frame-buffer-scale code).
 +float g_frameBufferAspectOverride = 0.f;
  AuroraWindowSize g_windowSize;
  std::vector<AuroraEvent> g_events;
- std::atomic_bool g_backgrounded = false;
-@@ -422,9 +426,11 @@
+ std::deque<std::string> g_eventStrings;
+@@ -484,9 +488,11 @@
    int fb_h = native_fb_h;
    if (g_frameBufferScale > 0.f) {
      const auto [baseW, baseH] = vi::configured_fb_size();
@@ -39,7 +39,7 @@ patch touches the frame-buffer-scale code).
      fb_w = scaledW;
      fb_h = scaledH;
    }
-@@ -550,6 +556,17 @@
+@@ -615,6 +621,17 @@
    request_frame_buffer_resize();
  }
  

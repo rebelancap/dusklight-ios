@@ -34,6 +34,9 @@ nothing broke. Ships with a diagnostic (patch 0019) that logs the crashing
 texture's size/format/label, so if it somehow still aborts we see exactly what.
 
 Three hunks: TargetConditionals include, enable-list gate (kept), disable-list add.
+
+2026-10 sync: upstream appended an Adreno toggle to disableToggles; the
+visionOS entry now anchors after it. Same three hunks.
 """
 import subprocess, pathlib, tempfile
 
@@ -69,11 +72,9 @@ assert text.count(tog_old) == 1, f"enable anchor: {text.count(tog_old)}"
 text = text.replace(tog_old, tog_new)
 
 # --- hunk 3: FORCE it off via the disable list on visionOS (the real fix) -----
-dis_old = ('    constexpr std::array disableToggles{\n'
-           '        "timestamp_quantization",\n'
+dis_old = ('        "use_spirv_reconvergence_mode",\n'
            '    };\n')
-dis_new = ('    constexpr std::array disableToggles{\n'
-           '        "timestamp_quantization",\n'
+dis_new = ('        "use_spirv_reconvergence_mode",\n'
            '#if defined(__APPLE__) && TARGET_OS_VISION\n'
            '        // Force OFF: MakeDebugName formats the user label, aurora sets replacement\n'
            '        // labels via `.label = c_str()` -> StringView length = WGPU_STRLEN (SIZE_MAX)\n'

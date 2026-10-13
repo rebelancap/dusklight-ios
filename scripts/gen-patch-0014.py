@@ -43,6 +43,8 @@ hardware.
 
 Isolated to the RmlUi density ratio; gameplay (GX/imgui) is untouched. Two hunks:
 the TargetConditionals include and the ratio computation.
+
+2026-10 sync: include anchor gained upstream's new <cmath> line; ratio hunk unchanged.
 """
 import subprocess, pathlib, tempfile
 
@@ -55,8 +57,10 @@ text = orig
 
 # --- hunk 1: TargetConditionals include (after <thread>) ---------------------
 inc_old = ('#include <algorithm>\n'
+           '#include <cmath>\n'
            '#include <thread>\n')
 inc_new = ('#include <algorithm>\n'
+           '#include <cmath>\n'
            '#include <thread>\n'
            '\n'
            '#ifdef __APPLE__\n'

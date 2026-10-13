@@ -43,10 +43,12 @@ hardware.
 Isolated to the RmlUi density ratio; gameplay (GX/imgui) is untouched. Two hunks:
 the TargetConditionals include and the ratio computation.
 
+2026-10 sync: include anchor gained upstream's new <cmath> line; ratio hunk unchanged.
+
 --- a/extern/aurora/lib/rmlui.cpp
 +++ b/extern/aurora/lib/rmlui.cpp
-@@ -3,6 +3,10 @@
- #include <algorithm>
+@@ -4,6 +4,10 @@
+ #include <cmath>
  #include <thread>
  
 +#ifdef __APPLE__
@@ -56,7 +58,7 @@ the TargetConditionals include and the ratio computation.
  #include <RmlUi/Core.h>
  #include <RmlUi/Core/Element.h>
  #include <RmlUi_Backend.h>
-@@ -63,8 +67,34 @@
+@@ -66,8 +70,34 @@
    }
    if (g_context->GetDimensions() != dimensions) {
      g_context->SetDimensions(dimensions);

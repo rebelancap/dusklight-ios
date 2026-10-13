@@ -33,7 +33,7 @@ produced for that config anyway.
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -403,11 +403,26 @@
+@@ -330,11 +330,26 @@
          src/dusk/audio/DspStub.cpp
          src/dusk/imgui/ImGuiAudio.cpp
  )
